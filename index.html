@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Verilog Coder</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <button id="toggle-sidebar" class="sidebar-toggle hidden" title="Show/hide sidebar" aria-label="Toggle sidebar">☰</button>
+      <h1>Verilog Coder</h1>
+    </div>
+    <div id="user-area" class="user-area hidden">
+      <span id="user-email" class="user-email"></span>
+      <button id="sign-out" class="btn btn-small">Sign out</button>
+    </div>
+  </header>
+
+  <!-- ============ AUTH VIEW (signed out) ============ -->
+  <section id="auth-view" class="auth-view hidden">
+    <form id="auth-form" class="auth-card" autocomplete="on">
+      <h2 id="auth-title">Sign in</h2>
+      <label class="field">
+        <span>Email</span>
+        <input id="auth-email" type="email" required autocomplete="email" />
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="auth-password" type="password" required minlength="6" autocomplete="current-password" />
+      </label>
+      <button id="auth-submit" type="submit" class="btn auth-submit">Sign in</button>
+      <p id="auth-message" class="auth-message" role="status"></p>
+      <p class="auth-toggle">
+        <span id="auth-toggle-text">Don't have an account?</span>
+        <a id="auth-toggle-link" href="#">Sign up</a>
+      </p>
+    </form>
+  </section>
+
+  <!-- ============ APP VIEW (signed in) ============ -->
+  <section id="app-view" class="app-view hidden">
+    <aside class="sidebar">
+      <!-- Projects -->
+      <div class="sidebar-section">
+        <div class="sidebar-header">
+          <span>Projects</span>
+          <button id="new-project" class="btn btn-small btn-new">+ New</button>
+        </div>
+        <ul id="project-list" class="tree-list"></ul>
+        <p id="projects-empty" class="empty-note hidden">No projects yet. Click “+ New”.</p>
+      </div>
+
+      <!-- Files of the selected project -->
+      <div id="files-section" class="sidebar-section files-section hidden">
+        <div class="sidebar-header project-header">
+          <input id="project-name" class="project-name-input" type="text" placeholder="Project name" title="Rename project" />
+          <button id="import-file" class="btn btn-export" title="Import files from your computer">⬆ Import</button>
+          <button id="delete-project" class="icon-btn btn-delete" title="Delete project">🗑</button>
+          <input id="import-input" type="file" multiple class="hidden" />
+        </div>
+        <div class="sidebar-header">
+          <span>Files</span>
+          <span class="header-btns">
+            <button id="detect-top" class="btn btn-small" title="Find the top-level module with AI">🔎 Top</button>
+            <button id="new-file" class="btn btn-small btn-new">+ New</button>
+          </span>
+        </div>
+        <ul id="file-list" class="tree-list"></ul>
+        <p id="files-empty" class="empty-note hidden">No files. Click “+ New”.</p>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div id="no-selection" class="no-project">
+        Select a project on the left, or create a new one to start coding.
+      </div>
+
+      <div id="editor-panel" class="editor-panel hidden">
+        <div class="editor-toolbar">
+          <input id="file-name" class="project-name" type="text" placeholder="filename.v" title="Rename file" />
+          <div class="toolbar-actions">
+            <button id="run-editor" class="btn btn-run">Run / Compile</button>
+            <button id="save-file" class="btn btn-save">Save</button>
+            <button id="view-diagram" class="btn hidden" title="View the dependency diagram">📊 Diagram</button>
+            <div class="more-wrap">
+              <button id="more-btn" class="btn">More ▾</button>
+              <div id="more-menu" class="more-menu hidden">
+                <button id="testbench-btn" class="btn btn-tb" title="Generate Verilog testbenches with AI">Testbench</button>
+                <button id="use-spec-btn" class="btn btn-spec hidden" title="Use this Markdown file as the design spec">Use as spec</button>
+                <button id="sync-btn" class="btn" title="Save and send all current project files to the AI">Sync current code</button>
+                <button id="github-push" class="btn btn-github" title="Push this project to GitHub">GitHub</button>
+                <button id="export-btn" class="btn btn-export" title="Download file or project">Export</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="editor"></div>
+        <div id="diagram-view" class="diagram-view hidden">
+          <div class="diagram-toolbar">
+            <span>Dependency diagram</span>
+            <button id="diagram-close" class="btn btn-small">← Back to code</button>
+          </div>
+          <div id="diagram-body" class="diagram-body"></div>
+        </div>
+        <div id="console-resizer" class="console-resizer hidden" title="Drag to resize console"></div>
+        <div id="output" class="output hidden">
+          <div class="output-header">
+            <span>Output</span>
+            <button id="clear-output" class="btn btn-small">Clear</button>
+          </div>
+          <pre id="output-body" class="output-body"></pre>
+        </div>
+      </div>
+    </main>
+  </section>
+
+  <!-- ============ AI CHAT WIDGET (placeholder) ============ -->
+  <button id="chat-toggle" class="chat-toggle hidden" title="LLM Connection" aria-label="Open LLM Connection">💬</button>
+
+  <section id="chat-panel" class="chat-panel hidden" aria-label="LLM Connection">
+    <div id="chat-resizer" class="chat-resizer" title="Drag to resize the panel" role="separator" aria-orientation="vertical"></div>
+    <div class="chat-header">
+      <span>LLM Connection</span>
+      <div class="chat-header-actions">
+        <button id="chat-expand" class="chat-close" title="Expand" aria-label="Expand panel">⤢</button>
+        <button id="chat-history" class="chat-close hidden" title="Chat history" aria-label="Chat history">☰</button>
+        <button id="chat-new" class="chat-close hidden" title="New chat" aria-label="New chat">✎</button>
+        <button id="chat-settings" class="chat-close" title="API key settings" aria-label="API key settings">🔑</button>
+        <button id="chat-close" class="chat-close" aria-label="Close assistant">✕</button>
+      </div>
+    </div>
+
+    <!-- History — list of saved conversations -->
+    <div id="chat-history-view" class="chat-history-view hidden">
+      <div class="chat-history-head">Chats</div>
+      <ul id="chat-history-list" class="chat-history-list"></ul>
+      <p id="chat-history-empty" class="chat-hint hidden">No saved chats yet.</p>
+    </div>
+
+    <!-- Welcome — shown when no LLM key is saved at all -->
+    <div id="chat-welcome" class="chat-welcome hidden">
+      <p class="chat-welcome-text">Connect to an LLM to get started</p>
+      <button id="chat-welcome-ok" class="btn">OK</button>
+    </div>
+
+    <!-- Key setup — shown until a key is saved -->
+    <div id="chat-key-setup" class="chat-key-setup">
+      <p class="chat-placeholder">
+        Connect an LLM to start chatting. Pick a provider and paste your API key —
+        it's stored only in your browser, and usage is billed to your own account.
+      </p>
+      <label class="chat-setup-label">Provider</label>
+      <select id="chat-provider" class="chat-field">
+        <option value="openrouter">OpenRouter — many models, one key</option>
+        <option value="openai">OpenAI (direct)</option>
+        <option value="anthropic">Anthropic / Claude (direct)</option>
+        <option value="google">Google Gemini (direct)</option>
+      </select>
+      <input id="chat-key-input" class="chat-field" type="password" placeholder="API key" autocomplete="off" />
+      <p id="chat-setup-hint" class="chat-hint"></p>
+      <button id="chat-key-save" class="btn">Save &amp; connect</button>
+      
+      <div id="chat-saved-keys-container" class="chat-saved-keys-container hidden">
+        <h4 class="saved-keys-title">Saved Connections</h4>
+        <div id="chat-saved-keys-list" class="saved-keys-list"></div>
+      </div>
+    </div>
+
+    <!-- Conversation — shown once connected -->
+    <div id="chat-conversation" class="chat-body hidden"></div>
+    <div id="chat-model-bar" class="chat-model-bar hidden">
+      <label class="chat-model-label" for="chat-model-current">Model</label>
+      <input id="chat-model-current" class="chat-model-current" type="text" list="chat-model-list" placeholder="Pick or type a model" title="Pick a popular model, or type any model id" />
+      <datalist id="chat-model-list"></datalist>
+    </div>
+    <div id="chat-attachments" class="chat-attachments hidden"></div>
+    <div id="chat-input-row" class="chat-input-row hidden">
+      <button id="chat-attach" class="chat-attach" type="button" title="Attach image">📎</button>
+      <textarea id="chat-input" class="chat-input" rows="2" title="Drag the bottom-right corner to make this bigger" placeholder="Ask the AI…  (Shift+Enter for a new line)"></textarea>
+      <button id="chat-send" class="btn btn-small">Send</button>
+      <input id="chat-image-input" type="file" accept="image/*" multiple class="hidden" />
+    </div>
+  </section>
+
+  <!-- ============ Delete confirmation ============ -->
+  <div id="del-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Delete file</h3>
+      <p id="del-modal-text" class="del-text"></p>
+      <div class="modal-actions">
+        <button id="del-cancel" class="btn btn-small">Cancel</button>
+        <button id="del-dontask" class="btn btn-small">Delete and don't ask again</button>
+        <button id="del-confirm" class="btn btn-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ File right-click menu ============ -->
+  <div id="file-menu" class="context-menu hidden">
+    <button id="file-menu-delete" class="context-item">🗑 Delete file</button>
+  </div>
+
+  <!-- ============ ACTIVITY CONSOLE (bottom-left) ============ -->
+  <button id="console-toggle" class="console-toggle hidden" title="Show activity console" aria-label="Show console">🖥</button>
+  <section id="console-panel" class="console-panel hidden" aria-label="Activity console">
+    <div id="console-header" class="console-header">
+      <span>Console</span>
+      <div class="console-header-actions">
+        <button id="console-config" class="console-btn hidden" title="Set backend URL for iverilog compile checks">⚙ Backend</button>
+        <button id="console-clear" class="console-btn" title="Clear">Clear</button>
+        <button id="console-close" class="console-btn" title="Minimize">✕</button>
+      </div>
+    </div>
+    <div id="console-body" class="console-body"></div>
+    <div class="console-resize console-resize-top" title="Drag to resize"></div>
+    <div class="console-resize console-resize-bottom" title="Drag to resize"></div>
+    <div class="console-resize console-resize-left" title="Drag to resize"></div>
+    <div class="console-resize console-resize-right" title="Drag to resize"></div>
+  </section>
+
+  <!-- ============ GitHub push dialog ============ -->
+  <div id="gh-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Push to GitHub</h3>
+      <label class="field">
+        <span>Repository</span>
+        <select id="gh-repo-select" class="modal-select"></select>
+      </label>
+      <label class="field hidden" id="gh-newname-field">
+        <span>New repository name</span>
+        <input id="gh-new-name" type="text" placeholder="my-verilog-project" />
+      </label>
+      <label class="gh-checkbox hidden" id="gh-private-field">
+        <input id="gh-private" type="checkbox" /> Make it private
+      </label>
+      <div class="modal-actions">
+        <button id="gh-cancel" class="btn btn-small">Cancel</button>
+        <button id="gh-confirm" class="btn">Push</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Export dialog ============ -->
+  <div id="export-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Export</h3>
+      <button id="export-file" class="btn">Download this file</button>
+      <button id="export-project" class="btn">Download whole project (.zip)</button>
+      <div class="modal-actions">
+        <button id="export-cancel" class="btn btn-small">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Testbench dialog ============ -->
+  <div id="tb-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Write testbench</h3>
+      <button id="tb-file" class="btn">For this file</button>
+      <button id="tb-top" class="btn">For the top module</button>
+      <div class="modal-actions">
+        <button id="tb-cancel" class="btn btn-small">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Verifier spec approval dialog ============ -->
+  <div id="spec-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h3>Review the spec</h3>
+      <p class="spec-sub">The Verifier wrote this specification from your prompt. Are you happy with it? If you approve, the Builder will build it.</p>
+      <pre id="spec-modal-text" class="spec-text"></pre>
+      <div id="spec-changes-wrap" class="hidden">
+        <label class="spec-changes-label" for="spec-changes">What would you like to change?</label>
+        <textarea id="spec-changes" class="spec-changes" rows="3" placeholder="e.g. make the data bus 16-bit and add a synchronous reset"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="spec-cancel" class="btn btn-small">Cancel</button>
+        <button id="spec-reject" class="btn btn-small">Request changes</button>
+        <button id="spec-approve" class="btn">Looks good — build it</button>
+        <button id="spec-send-changes" class="btn hidden">Send changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Libraries from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.7/ace.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

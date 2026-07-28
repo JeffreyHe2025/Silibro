@@ -1,0 +1,15 @@
+{
+  "name": "verilog-build-backend",
+  "version": "1.0.0",
+  "description": "Bottom-up Verilog builder: plan -> build each module -> iverilog compile-check",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.3",
+    "@langchain/langgraph": "^1.4.8",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
