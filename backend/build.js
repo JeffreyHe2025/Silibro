@@ -9,7 +9,8 @@
 // (all the modules it instantiates already exist and have compiled).
 
 const { callLLM } = require("./llm");
-const { compileVerilog } = require("./compile");
+const { compileVerilog, lintVerilog, synthCheck, runTestbench } = require("./compile");
+const { parseInterface, genSmokeTestbench } = require("./smoketb");
 
 // Pull the Verilog out of a ```verilog / ```systemverilog / ```file:... block
 // (or fall back to the whole reply).
@@ -71,6 +72,10 @@ async function planGraph(llm, spec) {
 // know the whole design and the status of every module (built / testbenched).
 function manifestReference(manifest) {
   if (!manifest || !manifest.length) return "";
+  const vlabel = (v) =>
+    v === "functional" ? "functionally verified"
+      : v === "smoke" ? "smoke-checked (structure only, function unproven)"
+      : "unverified";
   const lines = manifest.map(
     (m) =>
       "- " +
@@ -78,8 +83,12 @@ function manifestReference(manifest) {
       ": " +
       (m.built ? "BUILT" : "not built yet") +
       ", " +
-      (m.testbenched ? "testbench PASSING" : "not yet verified by a passing testbench") +
-      (m.complexity ? ", complexity " + m.complexity + "/5" : "")
+      vlabel(m.verification) +
+      (m.tier ? " [" + m.tier + " tier]" : "") +
+      (m.complexity != null ? ", complexity " + m.complexity + "/100" : "") +
+      (m.effectiveComplexity != null && m.effectiveComplexity !== m.complexity
+        ? " (effective " + m.effectiveComplexity + " incl. unverified deps)"
+        : "")
   );
   return (
     "\n\nPROJECT MODULE STATUS (reference — the full module list and where this one fits):\n" +
@@ -200,6 +209,15 @@ function computeFeatures(code) {
     caseItems += (blk.match(/(?:^|\n)\s*[^:\n]+:/g) || []).length;
   });
 
+  // Does the module COMPUTE/transform data? Strip bus ranges first so [WIDTH-1:0]
+  // doesn't count the '-' as arithmetic. Over-flagging is the safe side (it routes
+  // a module to functional testing, which is what we want for anything that computes).
+  const noRanges = src.replace(/\[[^\]]*\]/g, "");
+  const addSub = (noRanges.match(/[+\-]/g) || []).length;
+  const shifts = (src.match(/<<|>>/g) || []).length;
+  const mulDiv = count(/[*/%]/g);
+  const hasComputation = mulDiv > 0 || addSub > 0 || shifts > 0;
+
   return {
     loc: (src.split("\n").filter((l) => l.trim())).length,
     alwaysBlocks: count(/\balways\b/g),
@@ -209,26 +227,43 @@ function computeFeatures(code) {
     ifCount: count(/\bif\s*\(/g),
     caseCount: count(/\bcase[xz]?\b/g),
     caseItems: caseItems,
-    mulDiv: count(/[*/%]/g),
+    mulDiv: mulDiv,
+    addSub: addSub,
+    shifts: shifts,
+    hasComputation: hasComputation,
     submodules: submodules,
     maxWidth: maxWidth,
     hasMemory: /\breg\s*(?:\[[^\]]*\])?\s*\w+\s*\[/.test(src),
   };
 }
 
-// Step 3 (fallback): pure-code weighted baseline 1–5. Used when the LLM is
-// unavailable so there's always a number.
+// Floor-tier routing: does this module need a functional (oracle) test, or is the
+// code-only floor tier enough? Anything that COMPUTES gets functional testing
+// regardless of score (that's where silent calculation errors hide); otherwise a
+// numeric cutoff separates trivial select/wiring/register logic (smoke) from the
+// rest (functional). Cutoff is configurable via FLOOR_CUTOFF (default 22).
+const FLOOR_CUTOFF = parseInt(process.env.FLOOR_CUTOFF, 10) || 22;
+function routeTier(score, features) {
+  if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
+  if (score >= FLOOR_CUTOFF) return "functional";
+  return "smoke"; // trivial, non-computing → code-only floor tier is enough
+}
+
+// Step 3 (fallback): pure-code weighted baseline on a 1–100 scale. Used when the
+// LLM is unavailable so there's always a number.
 function baselineScore(f) {
-  let s = 1;
-  if (f.hasClock) s += 1;                        // sequential logic
-  if (f.clocks > 1) s += 1;                       // multiple clock domains (CDC risk)
-  if (f.asyncReset) s += 0.5;                     // async reset adds care
-  s += Math.min(2, Math.floor((f.ifCount + f.caseItems) / 4)); // branchiness
-  if (f.mulDiv > 0) s += 1;                        // multipliers/dividers
-  s += Math.min(1, Math.floor(f.submodules / 3)); // hierarchy
-  if (f.hasMemory) s += 1;                         // memories/RAM
-  if (f.maxWidth >= 32) s += 0.5;                  // wide datapaths
-  return Math.max(1, Math.min(5, Math.round(s)));
+  let s = 5; // base
+  if (f.hasClock) s += 10;                          // sequential logic
+  if (f.clocks > 1) s += 15;                         // multiple clock domains (CDC risk)
+  if (f.asyncReset) s += 5;                          // async reset adds care
+  s += Math.min(30, (f.ifCount + f.caseItems) * 3);  // branchiness
+  if (f.mulDiv > 0) s += 15;                          // multipliers/dividers
+  s += Math.min(20, f.submodules * 5);               // hierarchy
+  if (f.hasMemory) s += 15;                           // memories/RAM
+  if (f.maxWidth >= 32) s += 10;                      // wide datapaths
+  else if (f.maxWidth >= 16) s += 5;
+  s += Math.min(15, Math.floor(f.loc / 10));         // sheer size
+  return Math.max(1, Math.min(100, Math.round(s)));
 }
 
 // After a module is built, the Builder describes it for the Verifier — the
@@ -242,9 +277,9 @@ async function summarizeModule(llm, mod, code) {
   const sys =
     "You are the Builder describing a Verilog module you just wrote, for a separate Verifier " +
     "who will NOT see the source code. Read the FULL code and report its interface and conventions. " +
-    "Also give your OWN internal-logic complexity rating from 1 to 5 (1=trivial, 5=very complex), " +
+    "Also give your OWN internal-logic complexity rating from 1 to 100 (1=trivial, 100=extremely complex), " +
     "judging the whole module — datapath width, branching, FSM depth, arithmetic, clock domains, " +
-    "resets, and conceptual difficulty. " +
+    "resets, and conceptual difficulty. Rate ONLY this module's own logic, not modules it instantiates. " +
     "Do NOT include any Verilog code. Return ONLY JSON in exactly this shape:\n" +
     '{"module":"<name>",' +
     '"ports":[{"name":"<port>","direction":"input|output|inout","width":"<e.g. 1, [7:0], [WIDTH-1:0]>"}],' +
@@ -256,7 +291,7 @@ async function summarizeModule(llm, mod, code) {
     '"clocks":"<single (clk) or multiple (list them)>",' +
     '"resetType":"<synchronous | asynchronous | none>",' +
     '"resetTrigger":"<e.g. active-low rst_n, active-high rst, or none>"},' +
-    '"complexity":<integer 1-5>,' +
+    '"complexity":<integer 1-100>,' +
     '"complexityRationale":"<one line justifying the score>"}';
   const user =
     "Module '" + mod.name + "' (intended purpose: " + (mod.purpose || "") + "):\n\n" +
@@ -267,7 +302,7 @@ async function summarizeModule(llm, mod, code) {
     const obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
     obj.module = obj.module || mod.name;
     const c = parseInt(obj.complexity, 10);
-    obj.complexity = c >= 1 && c <= 5 ? c : null; // null => LLM value unusable
+    obj.complexity = c >= 1 && c <= 100 ? c : null; // null => LLM value unusable
     return obj;
   } catch (e) {
     // Fallback: never block the build on a summary parse failure. complexity=null
@@ -296,6 +331,7 @@ async function buildDesign(llm, spec, onProgress) {
     name: m.name,
     built: false,
     testbenched: false,
+    dependsOn: (m.dependsOn || []).slice(),
   }));
   const manifestByName = {};
   manifest.forEach((x) => (manifestByName[x.name] = x));
@@ -310,7 +346,7 @@ async function buildDesign(llm, spec, onProgress) {
       builtFiles[r.name] = r.code;
       // Complexity: TWO independent estimates, then averaged.
       //   codeScore  — deterministic formula over the static feature vector
-      //   llmScore   — the LLM's own 1–5 from reading the full module (no baseline shown)
+      //   llmScore   — the LLM's own 1–100 from reading the full module (no baseline shown)
       const features = computeFeatures(r.code);
       const codeScore = baselineScore(features);
       // Builder hands the Verifier a description of the module (NOT the code).
@@ -319,16 +355,87 @@ async function buildDesign(llm, spec, onProgress) {
       const llmScore = summary.complexity != null ? summary.complexity : codeScore;
       // Average the two (one decimal). If the LLM estimate is missing, this is just codeScore.
       const finalScore = Math.round(((llmScore + codeScore) / 2) * 10) / 10;
-      if (manifestByName[mod.name]) {
-        manifestByName[mod.name].built = true;
-        manifestByName[mod.name].complexity = finalScore;
-        manifestByName[mod.name].llmComplexity = summary.complexity; // may be null
-        manifestByName[mod.name].codeComplexity = codeScore;
-        manifestByName[mod.name].complexityRationale = summary.complexityRationale || "";
-        manifestByName[mod.name].features = features;
+      // Route to a verification tier: smoke (code-only floor) vs functional (oracle).
+      const tier = routeTier(finalScore, features);
+      const entry = manifestByName[mod.name];
+      if (entry) {
+        entry.built = true;
+        entry.complexity = finalScore;
+        entry.llmComplexity = summary.complexity; // may be null
+        entry.codeComplexity = codeScore;
+        entry.complexityRationale = summary.complexityRationale || "";
+        entry.features = features;
+        entry.hasComputation = features.hasComputation;
+        entry.tier = tier;
       }
       if (onProgress)
         onProgress({ type: "summary", module: mod.name, summary, complexity: finalScore });
+
+      // FLOOR-TIER TEST (code-only, no testbench, no oracle): structural lint.
+      // Only for smoke-tier modules. Functional-tier modules await the oracle
+      // testbench (not built yet), so they stay 'unverified' for now.
+      //   verification: 'unverified' | 'smoke' | 'functional'
+      //   Only 'functional' counts as trusted for pruning / fault isolation.
+      if (entry) {
+        if (tier === "smoke") {
+          const floorFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+          // Floor tier = structural lint + GENERIC SYNTHESIS (default for every
+          // floor-level module). Run both; they're local tools ($0, no API).
+          const lint = await lintVerilog(floorFiles, mod.name);
+          const synth = await synthCheck(floorFiles, mod.name);
+          entry.lintClean = lint.clean;
+          entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
+          entry.synthesizable = synth.synthesizable; // true | false | null (yosys absent)
+          entry.synthAvailable = synth.available;
+          entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
+
+          // Floor SMOKE TESTBENCH (code-generated, NO oracle): clock/reset gen +
+          // random stimulus + X-check on outputs. Catches undriven/uninitialized
+          // outputs, incomplete logic. Runs the module + its built deps + the TB.
+          let smokePassed = null, smokeMarkers = "";
+          try {
+            const iface = parseInterface(r.code);
+            if (iface) {
+              const stb = genSmokeTestbench(iface);
+              const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+              simFiles.push({ name: "smoke_tb.v", code: stb.code });
+              const sim = await runTestbench(simFiles, stb.top);
+              smokeMarkers = (sim.output.match(/SMOKE_[A-Z]+[^\n]*/g) || []).join("; ").slice(0, 400);
+              if (/SMOKE_PASS/.test(sim.output)) smokePassed = true;
+              else if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) smokePassed = false;
+              else smokePassed = sim.ok ? null : false; // inconclusive vs couldn't run
+            }
+          } catch (e) { smokeMarkers = String((e && e.message) || e); }
+          entry.smokeSimPassed = smokePassed;   // true | false | null (inconclusive)
+          entry.smokeSimOutput = smokeMarkers;
+
+          // Floor passes => 'smoke' only if lint is clean AND generic synthesis
+          // succeeds AND the smoke sim didn't hard-fail. Missing tools / inconclusive
+          // sim don't block (they degrade), only a real failure does.
+          const synthOk = synth.available ? synth.synthesizable === true : true;
+          const smokeOk = smokePassed !== false;
+          entry.verification = lint.clean && synthOk && smokeOk ? "smoke" : "unverified";
+        } else {
+          // functional tier — the oracle testbench isn't built yet (TODO).
+          entry.verification = "unverified";
+        }
+        // 'functional' is set only by the (future) oracle tier; testbenched mirrors it.
+        entry.testbenched = entry.verification === "functional";
+        if (onProgress)
+          onProgress({
+            type: "floor",
+            module: mod.name,
+            tier: tier,
+            verification: entry.verification,
+            lintClean: entry.lintClean,
+            lintReason: entry.lintOutput ? String(entry.lintOutput).split("\n")[0] : "",
+            synthesizable: entry.synthesizable,
+            synthAvailable: entry.synthAvailable,
+            synthReason: entry.synthOutput ? String(entry.synthOutput).split("\n")[0] : "",
+            smokeSimPassed: entry.smokeSimPassed,
+            smokeSimReason: entry.smokeSimOutput || "",
+          });
+      }
     }
     results.push(r);
     if (onProgress)
@@ -340,6 +447,30 @@ async function buildDesign(llm, spec, onProgress) {
         error: r.error,
       });
     if (!r.ok) break; // stop the run if a module can't be made to compile
+  }
+
+  // Effective complexity: a module's own complexity PLUS the effective complexity
+  // of every module it instantiates that is NOT FUNCTIONALLY verified — because
+  // that unverified logic also runs when this module runs. Only a FUNCTIONALLY
+  // verified child (passed an oracle testbench) is trusted and pruned to a black
+  // box; a smoke-passed child is structurally OK but its function is unproven, so
+  // it still counts. Computed bottom-up (order is dependencies-first).
+  const isTrusted = (m) => m && m.verification === "functional";
+  for (const mod of order) {
+    const entry = manifestByName[mod.name];
+    if (!entry || !entry.built || entry.complexity == null) continue;
+    let eff = entry.complexity;
+    const added = [];
+    (mod.dependsOn || []).forEach((dep) => {
+      const child = manifestByName[dep];
+      if (child && child.built && !isTrusted(child) && child.complexity != null) {
+        const childEff = child.effectiveComplexity != null ? child.effectiveComplexity : child.complexity;
+        eff += childEff;
+        added.push({ name: dep, added: childEff });
+      }
+    });
+    entry.effectiveComplexity = Math.round(eff * 10) / 10;
+    entry.complexityDeps = added; // not-yet-functionally-verified children that contributed
   }
 
   return { results, cycle: cycle.map((m) => m.name), files: builtFiles, summaries, manifest };

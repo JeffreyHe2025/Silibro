@@ -1675,6 +1675,37 @@
       // final-attempt failure is reported by the 'built' event below
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
+    } else if (ev.type === "floor") {
+      if (ev.tier === "smoke") {
+        consoleLog("🧪 " + ev.module + " — floor tier checks:", "info");
+        // Lint result
+        if (ev.lintClean) {
+          consoleLog("   • lint: clean ✓", "ok");
+        } else {
+          consoleLog("   • lint: issues ✗" + (ev.lintReason ? " — " + ev.lintReason : ""), "error");
+        }
+        // Generic synthesis result
+        if (ev.synthAvailable === false) {
+          consoleLog("   • synthesis: skipped (yosys not installed) — sim-only scan still ran", "warn");
+        } else if (ev.synthesizable === true) {
+          consoleLog("   • synthesis: synthesizable ✓", "ok");
+        } else if (ev.synthesizable === false) {
+          consoleLog("   • synthesis: NOT synthesizable ✗" + (ev.synthReason ? " — " + ev.synthReason : ""), "error");
+        }
+        // Floor-level testbench result (code-generated, no oracle)
+        if (ev.smokeSimPassed === true) {
+          consoleLog("   • floor testbench: PASSED ✓ (no undefined outputs)", "ok");
+        } else if (ev.smokeSimPassed === false) {
+          consoleLog("   • floor testbench: FAILED ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
+        } else {
+          consoleLog("   • floor testbench: inconclusive (couldn't parse/run)", "warn");
+        }
+        // Overall floor verdict
+        consoleLog("   → floor tier " + (ev.verification === "smoke" ? "PASSED ✓" : "FAILED ✗"),
+          ev.verification === "smoke" ? "ok" : "error");
+      } else {
+        consoleLog("🧪 " + ev.module + " — functional tier (needs an oracle testbench; not built yet)", "info");
+      }
     } else if (ev.type === "reviewing") {
       consoleLog("🔎 Verifier reviewing " + ev.count + " module summary/summaries against the spec…", "info");
     } else if (ev.type === "built" && !ev.ok) {
@@ -1872,7 +1903,7 @@
       table.className = "dev-table";
       var thead = document.createElement("thead");
       var htr = document.createElement("tr");
-      ["Module", "Built", "Testbenched", "Complexity"].forEach(function (h) {
+      ["Module", "Built", "Tier", "Verification", "Own", "Effective"].forEach(function (h) {
         var th = document.createElement("th"); th.textContent = h; htr.appendChild(th);
       });
       thead.appendChild(htr); table.appendChild(thead);
@@ -1883,21 +1914,46 @@
         var builtTd = document.createElement("td");
         builtTd.className = m.built ? "dev-yes" : "dev-no";
         builtTd.textContent = m.built ? "✓ built" : "✗ not built";
+        // Which tier this module is routed to (smoke = code-only floor; functional = needs oracle).
+        var tierTd = document.createElement("td");
+        tierTd.textContent = m.tier || "—";
+        if (m.hasComputation) tierTd.title = "computes/transforms data → functional (regardless of score)";
+        // Verification status: unverified / smoke / functional.
         var tbTd = document.createElement("td");
-        tbTd.className = m.testbenched ? "dev-yes" : "dev-no";
-        tbTd.textContent = m.testbenched ? "✓ passing" : "✗ none";
-        var cxTd = document.createElement("td");
-        cxTd.textContent = m.complexity ? m.complexity + "/5" : "—";
-        if (m.complexity) {
-          // hover shows the two averaged estimates + the LLM's rationale
+        var v = m.verification || (m.built ? "unverified" : "");
+        tbTd.className = v === "functional" ? "dev-yes" : v === "smoke" ? "" : "dev-no";
+        tbTd.textContent = v === "functional" ? "✓ functional" : v === "smoke" ? "◐ smoke" : (m.built ? "✗ unverified" : "—");
+        // Build a tooltip describing the floor checks (lint + generic synthesis).
+        var vtip = [];
+        if (v === "smoke") vtip.push("floor passed: lint + generic synthesis + smoke testbench; function NOT yet proven");
+        if (m.synthesizable === false) vtip.push("generic synthesis FAILED (not buildable hardware)");
+        else if (m.synthAvailable === false) vtip.push("synth skipped (yosys not installed)");
+        if (m.smokeSimPassed === false) vtip.push("smoke testbench FAILED: " + (m.smokeSimOutput || "undefined output"));
+        else if (m.smokeSimPassed === true) vtip.push("smoke testbench: no undefined outputs");
+        if (m.lintOutput) vtip.push("lint: " + m.lintOutput);
+        if (m.synthOutput && m.synthesizable === false) vtip.push("synth: " + m.synthOutput);
+        if (vtip.length) tbTd.title = vtip.join("\n");
+        // Own complexity (this module's logic only), 1-100.
+        var ownTd = document.createElement("td");
+        ownTd.textContent = m.complexity != null ? m.complexity + "/100" : "—";
+        if (m.complexity != null) {
           var parts = [];
           if (m.llmComplexity != null) parts.push("LLM " + m.llmComplexity);
           if (m.codeComplexity != null) parts.push("code " + m.codeComplexity);
           var tip = parts.length ? "avg of " + parts.join(" & ") : "";
           if (m.complexityRationale) tip += (tip ? " — " : "") + m.complexityRationale;
-          if (tip) cxTd.title = tip;
+          if (tip) ownTd.title = tip;
         }
-        tr.appendChild(nameTd); tr.appendChild(builtTd); tr.appendChild(tbTd); tr.appendChild(cxTd);
+        // Effective complexity (own + not-yet-functionally-verified instantiated modules).
+        var effTd = document.createElement("td");
+        var eff = m.effectiveComplexity != null ? m.effectiveComplexity : m.complexity;
+        effTd.textContent = eff != null ? String(eff) : "—";
+        if (m.complexityDeps && m.complexityDeps.length) {
+          effTd.title = "own " + m.complexity + " + unverified deps: " +
+            m.complexityDeps.map(function (d) { return d.name + " (+" + d.added + ")"; }).join(", ");
+        }
+        tr.appendChild(nameTd); tr.appendChild(builtTd); tr.appendChild(tierTd); tr.appendChild(tbTd);
+        tr.appendChild(ownTd); tr.appendChild(effTd);
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
