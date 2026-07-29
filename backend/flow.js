@@ -47,6 +47,9 @@ async function getGraph() {
     threadId: Annotation(),
     files: Annotation(),
     log: Annotation(),
+    summaries: Annotation(),
+    manifest: Annotation(),
+    review: Annotation(),
   });
 
   // The Verifier writes (or rewrites) the spec.
@@ -84,6 +87,8 @@ async function getGraph() {
   }
 
   // The Builder builds the approved spec bottom-up, iverilog-checking each module.
+  // It also produces a per-module summary (interface + conventions, NOT code)
+  // to hand to the Verifier for review.
   async function builder(state) {
     const log = [];
     const emit = progressListeners.get(state.threadId); // live stream, if attached
@@ -92,7 +97,50 @@ async function getGraph() {
       state.spec,
       function (ev) { log.push(ev); if (emit) emit(ev); }
     );
-    return { files: out.files || {}, log: log };
+    return {
+      files: out.files || {},
+      log: log,
+      summaries: out.summaries || [],
+      manifest: out.manifest || [],
+    };
+  }
+
+  // The Verifier reviews the built modules using ONLY the Builder's summaries
+  // (port list, parameters, intended function, clock/reset conventions) — NOT the
+  // code — so its check is independent: does each module's described interface and
+  // behavior match the spec's intent?
+  async function verifierReview(state) {
+    const summaries = state.summaries || [];
+    if (!summaries.length) return { review: "" };
+    const emit = progressListeners.get(state.threadId);
+    if (emit) emit({ type: "reviewing", count: summaries.length });
+    const sys =
+      "You are the Verifier. You are given the design spec and, for each built module, a STRUCTURED " +
+      "SUMMARY (port list, parameters, intended function, clock/reset conventions). You do NOT see the " +
+      "source code — by design — so judge only from these summaries against the spec. For EACH module, " +
+      "state whether it matches the spec's intent, ports, parameters, and clock/reset requirements. " +
+      "Flag any mismatch, missing port, or wrong reset style specifically. Be concise. Output Markdown " +
+      "with one section per module and a final one-line overall verdict.";
+    const manifest = state.manifest || [];
+    const statusRef = manifest.length
+      ? "\n\nMODULE STATUS (reference — the full module list):\n" +
+        manifest.map(function (m) {
+          return "- " + m.name + ": " + (m.built ? "built" : "NOT built") +
+            ", " + (m.testbenched ? "testbench passing" : "not yet testbenched");
+        }).join("\n")
+      : "";
+    const user =
+      "Design spec:\n" + state.spec + statusRef +
+      "\n\nBuilt module summaries (no code, as provided by the Builder):\n\n" +
+      summaries.map(function (s) { return "```json\n" + JSON.stringify(s, null, 2) + "\n```"; }).join("\n\n");
+    const review = await callLLM({
+      provider: state.provider,
+      key: state.key,
+      model: state.verifierModel,
+      system: sys,
+      messages: [{ role: "user", content: user }],
+    });
+    return { review: (review || "").trim() };
   }
 
   function route(state) {
@@ -103,10 +151,12 @@ async function getGraph() {
     .addNode("verifier", verifier)
     .addNode("approval", approval)
     .addNode("builder", builder)
+    .addNode("verifierReview", verifierReview)
     .addEdge(START, "verifier")
     .addEdge("verifier", "approval")
     .addConditionalEdges("approval", route, { verifier: "verifier", builder: "builder" })
-    .addEdge("builder", END)
+    .addEdge("builder", "verifierReview")
+    .addEdge("verifierReview", END)
     .compile({ checkpointer: new MemorySaver() });
 
   return _graph;
@@ -119,7 +169,14 @@ function summarize(result) {
     const val = interrupts[0].value || interrupts[0];
     return { done: false, spec: (val && val.spec) || "" };
   }
-  return { done: true, files: (result && result.files) || {}, log: (result && result.log) || [] };
+  return {
+    done: true,
+    files: (result && result.files) || {},
+    log: (result && result.log) || [],
+    summaries: (result && result.summaries) || [],
+    manifest: (result && result.manifest) || [], // dev-only reference on the client
+    review: (result && result.review) || "",
+  };
 }
 
 // Kick off a run: Verifier writes the spec, then we pause at approval.

@@ -208,6 +208,7 @@
     <div id="console-header" class="console-header">
       <span>Console</span>
       <div class="console-header-actions">
+        <button id="console-dev" class="console-btn hidden" title="Developer view (internal state)">🛠 Dev</button>
         <button id="console-config" class="console-btn hidden" title="Set backend URL for iverilog compile checks">⚙ Backend</button>
         <button id="console-clear" class="console-btn" title="Clear">Clear</button>
         <button id="console-close" class="console-btn" title="Minimize">✕</button>
@@ -277,11 +278,30 @@
         <textarea id="spec-changes" class="spec-changes" rows="3" placeholder="e.g. make the data bus 16-bit and add a synchronous reset"></textarea>
       </div>
       <div class="modal-actions">
+        <button id="spec-back" class="btn btn-small hidden">← Back</button>
         <button id="spec-cancel" class="btn btn-small">Cancel</button>
         <button id="spec-reject" class="btn btn-small">Request changes</button>
         <button id="spec-approve" class="btn">Looks good — build it</button>
         <button id="spec-send-changes" class="btn hidden">Send changes</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ============ Developer view (internal state) ============ -->
+  <div id="dev-modal" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <div class="dev-head">
+        <h3>Developer view</h3>
+        <button id="dev-close" class="btn btn-small">Close</button>
+      </div>
+      <p class="dev-sub">Internal state from the last build — normally LLM-only reference. Not shown to regular users.</p>
+      <div class="dev-tabs">
+        <button class="dev-tab active" data-dev-tab="tracker">Module tracker</button>
+        <button class="dev-tab" data-dev-tab="summaries">Summaries</button>
+        <button class="dev-tab" data-dev-tab="review">Verifier review</button>
+        <button class="dev-tab" data-dev-tab="log">Raw log</button>
+      </div>
+      <div id="dev-body" class="dev-body"></div>
     </div>
   </div>
 

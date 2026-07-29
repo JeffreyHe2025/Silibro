@@ -1215,6 +1215,47 @@ body.chat-docked #chat-expand { display: none; }
 }
 .spec-changes:focus { outline: none; border-color: #2563eb; }
 
+/* ---------- Developer view ---------- */
+.dev-head { display: flex; align-items: center; justify-content: space-between; }
+.dev-sub { margin: 0 0 12px; color: #6b7280; font-size: 12px; }
+.dev-tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e7eb; margin-bottom: 12px; flex-wrap: wrap; }
+.dev-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6b7280;
+  cursor: pointer;
+}
+.dev-tab:hover { color: #111827; }
+.dev-tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+.dev-body {
+  max-height: 55vh;
+  overflow: auto;
+  text-align: left;
+  font-size: 13px;
+}
+.dev-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  color: #1f2937;
+}
+.dev-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dev-table th, .dev-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eef2f7; }
+.dev-table th { color: #6b7280; font-weight: 600; }
+.dev-yes { color: #16a34a; font-weight: 700; }
+.dev-no { color: #9ca3af; }
+.dev-empty { color: #9ca3af; font-style: italic; padding: 8px 2px; }
+
 /* ---------- Dependency diagram (Mermaid) ---------- */
 .diagram-view {
   flex: 1 1 auto;

@@ -333,6 +333,7 @@
     userEmail.textContent = session.user.email;
     initEditor();
     loadProjects();
+    loadConversations();
     renderChatView();
   }
 
@@ -1382,29 +1383,51 @@
   var specRejectBtn = $("spec-reject");
   var specApproveBtn = $("spec-approve");
   var specSendChangesBtn = $("spec-send-changes");
+  var specBackBtn = $("spec-back");
   var flowThreadId = null;
   var lastFlowSpec = "";
+  var lastFlowData = null; // last build's internal data (dev view)
 
   function setSpecBusy(busy) {
     specApproveBtn.disabled = busy;
     specRejectBtn.disabled = busy;
     specSendChangesBtn.disabled = busy;
     specCancelBtn.disabled = busy;
+    specBackBtn.disabled = busy;
+  }
+  // Review view: Cancel · Request changes · Looks good — build it
+  function showSpecReview() {
+    specChangesWrap.classList.add("hidden");
+    specSendChangesBtn.classList.add("hidden");
+    specBackBtn.classList.add("hidden");
+    specRejectBtn.classList.remove("hidden");
+    specApproveBtn.classList.remove("hidden");
+    specCancelBtn.classList.remove("hidden");
+  }
+  // Change-request view: Back · Cancel · Send changes
+  function showSpecChangeRequest() {
+    specChangesWrap.classList.remove("hidden");
+    specSendChangesBtn.classList.remove("hidden");
+    specBackBtn.classList.remove("hidden");
+    specRejectBtn.classList.add("hidden");
+    specApproveBtn.classList.add("hidden");
+    specCancelBtn.classList.remove("hidden");
+    specChangesInput.focus();
   }
   function showSpecModal(spec) {
     lastFlowSpec = spec || "";
     specModalText.textContent = spec || "(the Verifier returned an empty spec)";
-    specChangesWrap.classList.add("hidden");
     specChangesInput.value = "";
-    specSendChangesBtn.classList.add("hidden");
-    specRejectBtn.classList.remove("hidden");
-    specApproveBtn.classList.remove("hidden");
+    showSpecReview();
     setSpecBusy(false);
     specModal.classList.remove("hidden");
   }
   function hideSpecModal() { specModal.classList.add("hidden"); }
 
-  async function ensureProject(promptText) {
+  // namingText: the full request used to name the project (prompt + any attached
+  // spec contents). namingImages: data-URL images attached to the request, so the
+  // namer can look at diagrams/screenshots too.
+  async function ensureProject(namingText, namingImages) {
     if (currentProjectId != null) return true;
     var initialName = "Generating name...";
     var res = await sb.from("projects").insert({ name: initialName }).select("id, name, updated_at").single();
@@ -1428,8 +1451,13 @@
         var key = getProviderKey(provider);
         var model = getProviderModel(provider);
         if (!key || !model) return;
-        var sys = "You are a naming assistant. Read the user's prompt and output ONLY a short, appropriate project name (2-5 words). No quotes, no markdown, no preamble.";
-        var reply = await callLLM(provider, key, model, sys, [{role: "user", content: promptText}]);
+        var sys = "You are a naming assistant for a Verilog hardware design tool. " +
+          "You are given the user's request to build a project — this may include a written prompt, " +
+          "the contents of attached specification file(s), and attached image(s) (e.g. block diagrams or screenshots). " +
+          "Read all of it and output ONLY a short, specific project name (2-5 words) describing what is being built " +
+          "(e.g. \"UART Transmitter\", \"8-bit CRC Generator\"). No quotes, no markdown, no preamble.";
+        var namingMsg = { role: "user", content: namingText || "Name this hardware project.", images: namingImages || [] };
+        var reply = await callLLM(provider, key, model, sys, [namingMsg]);
         var generatedName = reply.trim().replace(/^["']|["']$/g, "").slice(0, 50);
         if (generatedName && currentProjectId === project.id) {
           await sb.from("projects").update({ name: generatedName }).eq("id", project.id);
@@ -1476,8 +1504,11 @@
     renderAttachments();
     
     var attachedNames = specFiles.map(function (s) { return s.name; });
-    appendChatMsg("user", promptText + (attachedNames.length ? "\n\n📎 " + attachedNames.join(", ") : ""), imgs);
-    chatHistory.push({ role: "user", content: promptText, images: imgs });
+    var displayUserMsg = promptText + (attachedNames.length ? "\n\n📎 " + attachedNames.join(", ") : "");
+    appendChatMsg("user", displayUserMsg, imgs);
+    chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
+    try { await saveConversation(); } catch (e) {}
+
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
@@ -1504,14 +1535,18 @@
 
             var edits = parseFileEdits(reply);
             if (edits.length > 0) {
-                var ok = await ensureProject(promptText || "New AI Project");
+                var ok = await ensureProject(fullPrompt || promptText || "New AI Project", imgs);
                 if (ok) {
                     var applied = await applyFileEdits(edits);
                     if (applied.length) {
-                        appendChatMsg("assistant", "✎ Updated " + applied.length + " file(s): " + applied.join(", "));
+                        var msg1 = "✎ Updated " + applied.length + " file(s): " + applied.join(", ");
+                        appendChatMsg("assistant", msg1);
+                        chatHistory.push({ role: "assistant", content: msg1 });
                     }
                     if (applied.length < edits.length) {
-                        appendChatMsg("assistant", "⚠ Failed to save some files. Check the Console for details.").classList.add("chat-error");
+                        var msg2 = "⚠ Failed to save some files. Check the Console for details.";
+                        appendChatMsg("assistant", msg2).classList.add("chat-error");
+                        chatHistory.push({ role: "assistant", content: msg2 });
                     }
                 }
             }
@@ -1521,11 +1556,12 @@
         } finally {
             chatSend.disabled = false;
             chatConversation.scrollTop = chatConversation.scrollHeight;
+            try { await saveConversation(); } catch (e) {}
         }
         return;
     }
 
-    var ok = await ensureProject(promptText);
+    var ok = await ensureProject(fullPrompt, imgs);
     if (!ok) {
         chatSend.disabled = false;
         bubble.textContent = "⚠ Failed to create project.";
@@ -1637,6 +1673,10 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "summary") {
+      consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
+    } else if (ev.type === "reviewing") {
+      consoleLog("🔎 Verifier reviewing " + ev.count + " module summary/summaries against the spec…", "info");
     } else if (ev.type === "built" && !ev.ok) {
       consoleLog("✗ " + ev.module + " FAILED after " + ev.attempts + " attempts: " +
         String(ev.error || "").slice(0, 200), "error");
@@ -1671,35 +1711,86 @@
     return finalMsg;
   }
 
+  // Build a Markdown doc of the module summaries the Builder handed the Verifier.
+  function summariesToMarkdown(summaries) {
+    if (!summaries || !summaries.length) return "";
+    var out = ["# Module summaries (Builder → Verifier)", "",
+      "_Interface and conventions for each built module — no source code._", ""];
+    summaries.forEach(function (s) {
+      out.push("## " + (s.module || "module"));
+      if (s.intendedFunction) out.push("**Intended function:** " + s.intendedFunction);
+      if (s.ports && s.ports.length) {
+        out.push("", "**Ports:**");
+        s.ports.forEach(function (p) {
+          out.push("- `" + (p.direction || "?") + "` " + (p.name || "?") + " " + (p.width || ""));
+        });
+      }
+      if (s.parameters && s.parameters.length) {
+        out.push("", "**Parameters:**");
+        s.parameters.forEach(function (p) {
+          out.push("- " + (p.name || "?") + " = " + (p.default != null ? p.default : "n/a"));
+        });
+      }
+      if (s.clockReset) {
+        var c = s.clockReset;
+        out.push("", "**Clock/reset conventions:**");
+        if (c.clockTrigger) out.push("- Clock trigger: " + c.clockTrigger);
+        if (c.clockRate) out.push("- Clock rate: " + c.clockRate);
+        if (c.clocks) out.push("- Clocks: " + c.clocks);
+        if (c.resetType) out.push("- Reset type: " + c.resetType);
+        if (c.resetTrigger) out.push("- Reset trigger: " + c.resetTrigger);
+      }
+      out.push("");
+    });
+    return out.join("\n");
+  }
+
   async function finishFlowBuild(data) {
+    lastFlowData = data; // capture for the developer view
+    updateDevButton();
     consoleLog("✅ Spec approved — Builder finished.", "ok");
     if (currentProjectId == null) { consoleLog("⚠ Open a project to save the built files.", "error"); return; }
     var filesObj = data.files || {};
     var edits = [];
     if (lastFlowSpec) edits.push({ name: "spec.md", content: lastFlowSpec });
+    // Save the Builder→Verifier module summaries + the Verifier's review as files.
+    var summariesMd = summariesToMarkdown(data.summaries);
+    if (summariesMd) {
+      var doc = summariesMd;
+      if (data.review) doc += "\n\n---\n\n# Verifier review\n\n" + data.review;
+      edits.push({ name: "module_summaries.md", content: doc });
+    }
     Object.keys(filesObj).forEach(function (n) {
       edits.push({ name: /\.s?v$/i.test(n) ? n : n + ".v", content: filesObj[n] });
     });
     if (Object.keys(filesObj).length) {
       var applied = await applyFileEdits(edits);
-      appendChatMsg("assistant", "🏗 Built " + Object.keys(filesObj).length + " module(s) and saved the spec. Files: " + applied.join(", "));
+      var msg1 = "🏗 Built " + Object.keys(filesObj).length + " module(s) and saved the spec. Files: " + applied.join(", ");
+      appendChatMsg("assistant", msg1);
+      chatHistory.push({ role: "assistant", content: msg1 });
+
       if (applied.length < edits.length) {
-        appendChatMsg("assistant", "⚠ Failed to save some files. Check the Console for details.").classList.add("chat-error");
+        var msg2 = "⚠ Failed to save some files. Check the Console for details.";
+        appendChatMsg("assistant", msg2).classList.add("chat-error");
+        chatHistory.push({ role: "assistant", content: msg2 });
+      }
+      if (data.review) {
+        var msg3 = "🔎 Verifier review (from the module summaries, not the code):\n\n" + data.review;
+        appendChatMsg("assistant", msg3);
+        chatHistory.push({ role: "assistant", content: msg3 });
       }
     } else {
       if (lastFlowSpec) await applyFileEdits(edits); // still save the spec
-      appendChatMsg("assistant", "The build produced no compilable files — check the Console for the module that failed.");
+      var msg4 = "The build produced no compilable files — check the Console for the module that failed.";
+      appendChatMsg("assistant", msg4);
+      chatHistory.push({ role: "assistant", content: msg4 });
     }
+    try { await saveConversation(); } catch (e) {}
   }
 
   if (specApproveBtn) specApproveBtn.addEventListener("click", function () { flowDecision(true, ""); });
-  if (specRejectBtn) specRejectBtn.addEventListener("click", function () {
-    specChangesWrap.classList.remove("hidden");
-    specRejectBtn.classList.add("hidden");
-    specApproveBtn.classList.add("hidden");
-    specSendChangesBtn.classList.remove("hidden");
-    specChangesInput.focus();
-  });
+  if (specRejectBtn) specRejectBtn.addEventListener("click", showSpecChangeRequest);
+  if (specBackBtn) specBackBtn.addEventListener("click", showSpecReview); // back to review
   if (specSendChangesBtn) specSendChangesBtn.addEventListener("click", function () {
     var ch = specChangesInput.value.trim();
     if (!ch) { specChangesInput.focus(); return; }
@@ -1736,6 +1827,101 @@
     consoleToggle.classList.remove("hidden");
   });
   consoleClearBtn.addEventListener("click", function () { consoleBody.innerHTML = ""; });
+
+  // ---- Developer view (internal LLM-reference state; hidden unless dev mode) ----
+  var consoleDevBtn = $("console-dev");
+  var devModal = $("dev-modal");
+  var devCloseBtn = $("dev-close");
+  var devBody = $("dev-body");
+  var devTabButtons = document.querySelectorAll(".dev-tab");
+  var devTab = "tracker";
+
+  function isDevMode() { return localStorage.getItem("dev_mode") === "true"; }
+  function updateDevButton() {
+    if (consoleDevBtn) consoleDevBtn.classList.toggle("hidden", !isDevMode());
+  }
+  function setDevMode(on) {
+    localStorage.setItem("dev_mode", on ? "true" : "false");
+    updateDevButton();
+    consoleLog(on ? "🛠 Developer mode ON (🛠 Dev button in the console header)" : "Developer mode off", "info");
+    if (!on && devModal) devModal.classList.add("hidden");
+  }
+  // Toggle developer mode with Ctrl/Cmd + Shift + D.
+  document.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "D" || e.key === "d")) {
+      e.preventDefault();
+      setDevMode(!isDevMode());
+    }
+  });
+
+  function renderDevBody() {
+    if (!devBody) return;
+    devBody.innerHTML = "";
+    var d = lastFlowData;
+    if (!d) {
+      devBody.innerHTML = '<p class="dev-empty">No build yet. Run a build (approve a spec) to populate this.</p>';
+      return;
+    }
+    if (devTab === "tracker") {
+      var manifest = d.manifest || [];
+      if (!manifest.length) {
+        devBody.innerHTML = '<p class="dev-empty">No module manifest in the last build.</p>';
+        return;
+      }
+      var table = document.createElement("table");
+      table.className = "dev-table";
+      var thead = document.createElement("thead");
+      var htr = document.createElement("tr");
+      ["Module", "Built", "Testbenched", "Complexity"].forEach(function (h) {
+        var th = document.createElement("th"); th.textContent = h; htr.appendChild(th);
+      });
+      thead.appendChild(htr); table.appendChild(thead);
+      var tbody = document.createElement("tbody");
+      manifest.forEach(function (m) {
+        var tr = document.createElement("tr");
+        var nameTd = document.createElement("td"); nameTd.textContent = m.name || "?";
+        var builtTd = document.createElement("td");
+        builtTd.className = m.built ? "dev-yes" : "dev-no";
+        builtTd.textContent = m.built ? "✓ built" : "✗ not built";
+        var tbTd = document.createElement("td");
+        tbTd.className = m.testbenched ? "dev-yes" : "dev-no";
+        tbTd.textContent = m.testbenched ? "✓ passing" : "✗ none";
+        var cxTd = document.createElement("td");
+        cxTd.textContent = m.complexity ? m.complexity + "/5" : "—";
+        if (m.complexity) {
+          // hover shows the two averaged estimates + the LLM's rationale
+          var parts = [];
+          if (m.llmComplexity != null) parts.push("LLM " + m.llmComplexity);
+          if (m.codeComplexity != null) parts.push("code " + m.codeComplexity);
+          var tip = parts.length ? "avg of " + parts.join(" & ") : "";
+          if (m.complexityRationale) tip += (tip ? " — " : "") + m.complexityRationale;
+          if (tip) cxTd.title = tip;
+        }
+        tr.appendChild(nameTd); tr.appendChild(builtTd); tr.appendChild(tbTd); tr.appendChild(cxTd);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      devBody.appendChild(table);
+    } else {
+      var pre = document.createElement("pre");
+      if (devTab === "summaries") pre.textContent = JSON.stringify(d.summaries || [], null, 2);
+      else if (devTab === "review") pre.textContent = d.review || "(no verifier review)";
+      else if (devTab === "log") pre.textContent = JSON.stringify(d.log || [], null, 2);
+      devBody.appendChild(pre);
+    }
+  }
+  function openDevModal() { renderDevBody(); if (devModal) devModal.classList.remove("hidden"); }
+  if (consoleDevBtn) consoleDevBtn.addEventListener("click", openDevModal);
+  if (devCloseBtn) devCloseBtn.addEventListener("click", function () { devModal.classList.add("hidden"); });
+  devTabButtons.forEach(function (t) {
+    t.addEventListener("click", function () {
+      devTab = t.getAttribute("data-dev-tab");
+      devTabButtons.forEach(function (x) { x.classList.remove("active"); });
+      t.classList.add("active");
+      renderDevBody();
+    });
+  });
+  updateDevButton(); // reflect saved dev-mode state on load
 
   // ---- Backend (EC2) compile checks via iverilog ----
   function getBackendUrl() { return "http://18.226.241.100:3000"; }
@@ -2138,6 +2324,14 @@
       .order("updated_at", { ascending: false });
     conversations = res.data || [];
     renderHistoryList();
+    if (chatHistory.length === 0 && conversations.length > 0 && currentConversationId == null) {
+      var lastId = localStorage.getItem("last_conversation_id");
+      if (lastId && conversations.find(function(c) { return c.id === lastId; })) {
+        openConversation(lastId);
+      } else {
+        openConversation(conversations[0].id);
+      }
+    }
   }
 
   function renderHistoryList() {
@@ -2171,6 +2365,7 @@
     var res = await sb.from("conversations").select("id, messages").eq("id", id).single();
     if (res.error || !res.data) { alert("Couldn't open that chat."); return; }
     currentConversationId = id;
+    localStorage.setItem("last_conversation_id", id);
     chatHistory = Array.isArray(res.data.messages) ? res.data.messages : [];
     renderConversation();
     showConversation();
@@ -2179,6 +2374,7 @@
   function newChat() {
     chatHistory = [];
     currentConversationId = null;
+    localStorage.removeItem("last_conversation_id");
     chatConversation.innerHTML = "";
     showConversation();
   }
@@ -2192,7 +2388,11 @@
       var ins = await sb.from("conversations")
         .insert({ title: title, provider: provider, model: model, messages: chatHistory })
         .select("id").single();
-      if (!ins.error && ins.data) currentConversationId = ins.data.id;
+      if (!ins.error && ins.data) {
+        currentConversationId = ins.data.id;
+        localStorage.setItem("last_conversation_id", ins.data.id);
+        loadConversations(); // refresh the list to show the new chat
+      }
     } else {
       await sb.from("conversations")
         .update({ provider: provider, model: model, messages: chatHistory })
@@ -2218,6 +2418,7 @@
     conversations = conversations.filter(function (c) { return c.id !== id; });
     if (currentConversationId === id) {
       currentConversationId = null;
+      localStorage.removeItem("last_conversation_id");
       chatHistory = [];
       chatConversation.innerHTML = "";
     }
@@ -2543,7 +2744,7 @@
     var imgs = pendingImages.slice();
     if (!text && !imgs.length) return;
 
-    var ok = await ensureProject(text || "New AI Project");
+    var ok = await ensureProject(text || "New AI Project", imgs);
     if (!ok) return;
     chatInput.value = "";
     pendingImages = [];

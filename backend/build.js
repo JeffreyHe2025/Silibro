@@ -67,15 +67,37 @@ async function planGraph(llm, spec) {
     .filter((m) => m.name);
 }
 
+// Render the module manifest as a compact reference block for the LLMs, so they
+// know the whole design and the status of every module (built / testbenched).
+function manifestReference(manifest) {
+  if (!manifest || !manifest.length) return "";
+  const lines = manifest.map(
+    (m) =>
+      "- " +
+      m.name +
+      ": " +
+      (m.built ? "BUILT" : "not built yet") +
+      ", " +
+      (m.testbenched ? "testbench PASSING" : "not yet verified by a passing testbench") +
+      (m.complexity ? ", complexity " + m.complexity + "/5" : "")
+  );
+  return (
+    "\n\nPROJECT MODULE STATUS (reference — the full module list and where this one fits):\n" +
+    lines.join("\n")
+  );
+}
+
 // Step 3: build one module, compile-checking it (with retries).
 // onAttempt(ev) (optional) is called after each compile so callers can stream
 // retries live: { type:'attempt', module, attempt, maxTries, ok, error }.
-async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt) {
+// manifest (optional) is the whole-design status list, passed as LLM reference.
+async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, manifest) {
   maxTries = maxTries || 3;
   const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
   const depContext = depNames
     .map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n])
     .join("\n\n");
+  const statusRef = manifestReference(manifest);
 
   let lastErr = "";
   for (let attempt = 1; attempt <= maxTries; attempt++) {
@@ -91,6 +113,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt) {
       "' — " +
       mod.purpose +
       ".";
+    if (statusRef) user += statusRef;
     if (depContext)
       user +=
         "\n\nIt may instantiate these already-built modules (do not redefine them):\n\n" +
@@ -135,6 +158,130 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt) {
   return { name: mod.name, code: null, ok: false, attempts: maxTries, error: lastErr };
 }
 
+// --- Complexity: code computes the evidence, the LLM produces the verdict -----
+
+// Step 1 of the pipeline: deterministic static feature vector from the code.
+// Regex-based (no extra deps) — approximate but reproducible, so scores are
+// comparable across modules and stable across re-runs.
+function computeFeatures(code) {
+  // Strip comments so they don't inflate counts.
+  const src = String(code || "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const count = (re) => (src.match(re) || []).length;
+
+  const edges = src.match(/(?:pos|neg)edge\s+(\w+)/g) || [];
+  const clockSignals = {};
+  let asyncReset = false;
+  edges.forEach((e) => {
+    const sig = e.replace(/(?:pos|neg)edge\s+/, "");
+    if (/rst|reset/i.test(sig)) asyncReset = true; // async reset, not a clock
+    else clockSignals[sig] = true;
+  });
+
+  // Rough submodule instantiations: "Name inst (" at statement start, minus keywords.
+  const KEYWORDS = /^(if|for|while|case|casez|casex|always|initial|assign|module|function|task|begin|generate|else|posedge|negedge|input|output|inout|wire|reg|logic|parameter|localparam|integer|genvar)$/;
+  const instMatches = src.match(/(?:^|\n)\s*([A-Za-z_]\w*)\s+(?:#\([^)]*\)\s*)?[A-Za-z_]\w*\s*\(/g) || [];
+  const submodules = instMatches.filter((m) => {
+    const first = (m.trim().match(/^([A-Za-z_]\w*)/) || [])[1] || "";
+    return !KEYWORDS.test(first);
+  }).length;
+
+  // Widest bus [N:0] -> N+1 bits.
+  let maxWidth = 1;
+  (src.match(/\[\s*(\d+)\s*:\s*0\s*\]/g) || []).forEach((w) => {
+    const n = parseInt((w.match(/(\d+)/) || [])[1], 10);
+    if (n + 1 > maxWidth) maxWidth = n + 1;
+  });
+
+  // Rough FSM state count: items inside case…endcase blocks.
+  let caseItems = 0;
+  (src.match(/\bcase[xz]?\b([\s\S]*?)\bendcase\b/g) || []).forEach((blk) => {
+    caseItems += (blk.match(/(?:^|\n)\s*[^:\n]+:/g) || []).length;
+  });
+
+  return {
+    loc: (src.split("\n").filter((l) => l.trim())).length,
+    alwaysBlocks: count(/\balways\b/g),
+    hasClock: edges.length > 0,
+    clocks: Object.keys(clockSignals).length,
+    asyncReset: asyncReset,
+    ifCount: count(/\bif\s*\(/g),
+    caseCount: count(/\bcase[xz]?\b/g),
+    caseItems: caseItems,
+    mulDiv: count(/[*/%]/g),
+    submodules: submodules,
+    maxWidth: maxWidth,
+    hasMemory: /\breg\s*(?:\[[^\]]*\])?\s*\w+\s*\[/.test(src),
+  };
+}
+
+// Step 3 (fallback): pure-code weighted baseline 1–5. Used when the LLM is
+// unavailable so there's always a number.
+function baselineScore(f) {
+  let s = 1;
+  if (f.hasClock) s += 1;                        // sequential logic
+  if (f.clocks > 1) s += 1;                       // multiple clock domains (CDC risk)
+  if (f.asyncReset) s += 0.5;                     // async reset adds care
+  s += Math.min(2, Math.floor((f.ifCount + f.caseItems) / 4)); // branchiness
+  if (f.mulDiv > 0) s += 1;                        // multipliers/dividers
+  s += Math.min(1, Math.floor(f.submodules / 3)); // hierarchy
+  if (f.hasMemory) s += 1;                         // memories/RAM
+  if (f.maxWidth >= 32) s += 0.5;                  // wide datapaths
+  return Math.max(1, Math.min(5, Math.round(s)));
+}
+
+// After a module is built, the Builder describes it for the Verifier — the
+// INTERFACE + CONVENTIONS, deliberately WITHOUT the source code, so the Verifier
+// reviews it against the spec's intent (not by re-reading the implementation).
+// Also produces the LLM's OWN 1–5 complexity rating from the full code — with NO
+// code baseline shown, so it's an independent estimate. buildDesign then averages
+// it with the code-computed score.
+// Returns a structured summary object (complexity = the LLM's own estimate).
+async function summarizeModule(llm, mod, code) {
+  const sys =
+    "You are the Builder describing a Verilog module you just wrote, for a separate Verifier " +
+    "who will NOT see the source code. Read the FULL code and report its interface and conventions. " +
+    "Also give your OWN internal-logic complexity rating from 1 to 5 (1=trivial, 5=very complex), " +
+    "judging the whole module — datapath width, branching, FSM depth, arithmetic, clock domains, " +
+    "resets, and conceptual difficulty. " +
+    "Do NOT include any Verilog code. Return ONLY JSON in exactly this shape:\n" +
+    '{"module":"<name>",' +
+    '"ports":[{"name":"<port>","direction":"input|output|inout","width":"<e.g. 1, [7:0], [WIDTH-1:0]>"}],' +
+    '"parameters":[{"name":"<param>","default":"<value or n/a>"}],' +
+    '"intendedFunction":"<1-3 sentences on what the module does>",' +
+    '"clockReset":{' +
+    '"clockTrigger":"<e.g. posedge clk, negedge clk, or none (purely combinational)>",' +
+    '"clockRate":"<how fast the clock advances work, e.g. one result per clock; or none if combinational>",' +
+    '"clocks":"<single (clk) or multiple (list them)>",' +
+    '"resetType":"<synchronous | asynchronous | none>",' +
+    '"resetTrigger":"<e.g. active-low rst_n, active-high rst, or none>"},' +
+    '"complexity":<integer 1-5>,' +
+    '"complexityRationale":"<one line justifying the score>"}';
+  const user =
+    "Module '" + mod.name + "' (intended purpose: " + (mod.purpose || "") + "):\n\n" +
+    "```verilog\n" + code + "\n```";
+  try {
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const s = reply.replace(/```json|```/g, "");
+    const obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
+    obj.module = obj.module || mod.name;
+    const c = parseInt(obj.complexity, 10);
+    obj.complexity = c >= 1 && c <= 5 ? c : null; // null => LLM value unusable
+    return obj;
+  } catch (e) {
+    // Fallback: never block the build on a summary parse failure. complexity=null
+    // means "no LLM estimate"; buildDesign falls back to the code score alone.
+    return {
+      module: mod.name,
+      intendedFunction: mod.purpose || "",
+      complexity: null,
+      complexityRationale: "LLM rating unavailable",
+      note: "summary unavailable",
+    };
+  }
+}
+
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
 async function buildDesign(llm, spec, onProgress) {
   const modules = await planGraph(llm, spec);
@@ -142,12 +289,47 @@ async function buildDesign(llm, spec, onProgress) {
   if (onProgress)
     onProgress({ type: "plan", order: order.map((m) => m.name), cycle: cycle.map((m) => m.name) });
 
+  // Manifest of EVERY planned module (built order + any that couldn't be ordered),
+  // tracking build + testbench status. Kept as LLM reference, not user-facing.
+  // testbenched stays false until the simulation layer is wired to run testbenches.
+  const manifest = order.concat(cycle).map((m) => ({
+    name: m.name,
+    built: false,
+    testbenched: false,
+  }));
+  const manifestByName = {};
+  manifest.forEach((x) => (manifestByName[x.name] = x));
+
   const builtFiles = {};
   const results = [];
+  const summaries = [];
   for (const mod of order) {
     if (onProgress) onProgress({ type: "building", module: mod.name });
-    const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress);
-    if (r.ok) builtFiles[r.name] = r.code;
+    const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest);
+    if (r.ok) {
+      builtFiles[r.name] = r.code;
+      // Complexity: TWO independent estimates, then averaged.
+      //   codeScore  — deterministic formula over the static feature vector
+      //   llmScore   — the LLM's own 1–5 from reading the full module (no baseline shown)
+      const features = computeFeatures(r.code);
+      const codeScore = baselineScore(features);
+      // Builder hands the Verifier a description of the module (NOT the code).
+      const summary = await summarizeModule(llm, mod, r.code);
+      summaries.push(summary);
+      const llmScore = summary.complexity != null ? summary.complexity : codeScore;
+      // Average the two (one decimal). If the LLM estimate is missing, this is just codeScore.
+      const finalScore = Math.round(((llmScore + codeScore) / 2) * 10) / 10;
+      if (manifestByName[mod.name]) {
+        manifestByName[mod.name].built = true;
+        manifestByName[mod.name].complexity = finalScore;
+        manifestByName[mod.name].llmComplexity = summary.complexity; // may be null
+        manifestByName[mod.name].codeComplexity = codeScore;
+        manifestByName[mod.name].complexityRationale = summary.complexityRationale || "";
+        manifestByName[mod.name].features = features;
+      }
+      if (onProgress)
+        onProgress({ type: "summary", module: mod.name, summary, complexity: finalScore });
+    }
     results.push(r);
     if (onProgress)
       onProgress({
@@ -160,7 +342,7 @@ async function buildDesign(llm, spec, onProgress) {
     if (!r.ok) break; // stop the run if a module can't be made to compile
   }
 
-  return { results, cycle: cycle.map((m) => m.name), files: builtFiles };
+  return { results, cycle: cycle.map((m) => m.name), files: builtFiles, summaries, manifest };
 }
 
-module.exports = { buildDesign, planGraph, topoSort, buildModule };
+module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore };
