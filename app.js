@@ -121,7 +121,7 @@
   var clearBtn = $("clear-output");
   var outputPanel = $("output");
   var outputBody = $("output-body");
-  var consoleResizer = $("console-resizer");
+
   var consoleToggle = $("console-toggle");
   var consolePanel = $("console-panel");
   var consoleBody = $("console-body");
@@ -1324,26 +1324,25 @@
 
   // Console Resizer
   (function () {
-    var handle = consoleResizer;
+    var handle = document.querySelector(".console-resize-top");
     if (!handle) return;
     var dragging = false;
     function readH() {
-      var h = parseFloat(outputPanel.style.height);
-      return isNaN(h) ? 220 : h;
+      var h = parseFloat(document.body.style.getPropertyValue("--console-h"));
+      return isNaN(h) ? 180 : h;
     }
     function applyH(h) {
       if (h < 50) h = 50; // min height
       var max = window.innerHeight * 0.8;
       if (h > max) h = max;
-      outputPanel.style.height = h + "px";
+      document.body.style.setProperty("--console-h", h + "px");
+      if (editor) editor.resize();
     }
     function pointY(e) { return e.touches ? e.touches[0].clientY : e.clientY; }
     function onMove(e) {
       if (!dragging) return;
       var y = pointY(e);
-      var rect = outputPanel.getBoundingClientRect();
-      // rect.bottom is the bottom of the window effectively
-      applyH(rect.bottom - y);
+      applyH(window.innerHeight - y);
       e.preventDefault();
     }
     function onUp() {
@@ -1351,13 +1350,14 @@
       dragging = false;
       document.body.classList.remove("console-resizing");
       var h = readH();
-      if (h) localStorage.setItem("console_height", h);
+      if (h) localStorage.setItem("docked_console_h", h);
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("touchmove", onMove);
       document.removeEventListener("touchend", onUp);
     }
     function onDown(e) {
+      if (!document.body.classList.contains("chat-docked")) return;
       dragging = true;
       document.body.classList.add("console-resizing");
       document.addEventListener("mousemove", onMove);
@@ -1368,7 +1368,7 @@
     }
     handle.addEventListener("mousedown", onDown);
     handle.addEventListener("touchstart", onDown, { passive: false });
-    var savedH = localStorage.getItem("console_height");
+    var savedH = localStorage.getItem("docked_console_h");
     if (savedH) applyH(parseFloat(savedH));
   })();
 
