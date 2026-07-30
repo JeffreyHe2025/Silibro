@@ -1,12 +1,18 @@
 version: 1
 frontend:
   phases:
-    # Static site — nothing to build. index.html/app.js/styles.css are served as-is.
     build:
-      commands: []
+      commands:
+        # Assemble a clean publish folder with ONLY the frontend files.
+        # backend/, *.sql, README, etc. are deliberately left out so Amplify
+        # never serves them.
+        - rm -rf dist && mkdir dist
+        - cp index.html app.js styles.css config.js dist/
+        # If you add frontend assets later (e.g. favicon.ico, images/),
+        # add them to the line above so they get published.
   artifacts:
-    # Publish the repo root as the web root (index.html at "/").
-    baseDirectory: /
+    # Publish only the dist/ folder — index.html is at "/".
+    baseDirectory: dist
     files:
       - '**/*'
   cache:
