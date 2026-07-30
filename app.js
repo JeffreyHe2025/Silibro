@@ -1980,7 +1980,7 @@
   updateDevButton(); // reflect saved dev-mode state on load
 
   // ---- Backend (EC2) compile checks via iverilog ----
-  function getBackendUrl() { return "http://18.226.241.100:3000"; }
+  function getBackendUrl() { return "https://verilogprojectcreate.duckdns.org"; }
 
 
   // POST files to the backend's /compile endpoint → { ok, output } (or null).
