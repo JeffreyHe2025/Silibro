@@ -1,0 +1,13 @@
+version: 1
+frontend:
+  phases:
+    # Static site — nothing to build. index.html/app.js/styles.css are served as-is.
+    build:
+      commands: []
+  artifacts:
+    # Publish the repo root as the web root (index.html at "/").
+    baseDirectory: /
+    files:
+      - '**/*'
+  cache:
+    paths: []
