@@ -362,6 +362,127 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
   return { code: code, top: tbTopName(code, mod.name) };
 }
 
+// Run one module's functional oracle test. Returns { passed:true|false|null, details }.
+async function funcTest(llm, spec, entry, builtFiles) {
+  const ftb = await genFunctionalTestbench(
+    llm, { name: entry.name, purpose: entry.purpose }, spec, entry.summary || {}
+  );
+  if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated" };
+  const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+  simFiles.push({ name: "func_tb.v", code: ftb.code });
+  const sim = await runTestbench(simFiles, ftb.top);
+  const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
+  if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
+  if (/FUNC_FAIL/.test(sim.output)) return { passed: false, details: markers };
+  return { passed: null, details: markers };
+}
+
+// Rebuild a module to fix a FUNCTIONAL bug, keeping its interface; compile-check
+// with retries. Returns corrected code or null. Its verified deps are given as
+// context (do-not-redefine), so the fix targets this module's own logic.
+async function fixModuleFunctional(llm, spec, entry, builtFiles) {
+  const depNames = (entry.dependsOn || []).filter((n) => builtFiles[n]);
+  const depContext = depNames
+    .map((n) => "--- " + n + ".v (already built, verified) ---\n" + builtFiles[n])
+    .join("\n\n");
+  const sys =
+    "You are a Verilog module writer. A synthesizable module you wrote FAILED a functional test. " +
+    "Rewrite ONLY the module '" + entry.name + "' to fix the bug, keeping the SAME interface (ports/params). " +
+    "Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
+  let base =
+    "Design spec:\n" + spec +
+    "\n\nModule '" + entry.name + "' — " + (entry.purpose || "") +
+    " — FAILED this functional test (expected vs actual):\n" + (entry.funcTbOutput || "") +
+    "\n\nReturn a corrected version of '" + entry.name + "'.";
+  if (depContext)
+    base += "\n\nIt instantiates these already-built, verified modules (do NOT redefine them):\n\n" + depContext;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const user = base + (lastErr ? "\n\nYour previous attempt failed to COMPILE:\n" + lastErr + "\n\nReturn a corrected, compiling version." : "");
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const code = extractVerilog(reply);
+    const files = Object.keys(builtFiles)
+      .filter((n) => n !== entry.name)
+      .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+    files.push({ name: entry.name + ".v", code });
+    const res = await compileVerilog(files, entry.name);
+    if (res.ok) return code;
+    lastErr = res.output;
+  }
+  return null;
+}
+
+// Cost cut: only NOT-yet-functional built children are suspects; order them by
+// suspicion (computing modules first, then higher complexity) so the likely
+// culprit is tested first.
+function suspectChildren(entry, modByName) {
+  return (entry.dependsOn || [])
+    .map((n) => modByName[n])
+    .filter((c) => c && c.built && c.verification !== "functional")
+    .sort((a, b) => {
+      const ac = a.hasComputation ? 1 : 0, bc = b.hasComputation ? 1 : 0;
+      if (bc !== ac) return bc - ac;
+      return (b.complexity || 0) - (a.complexity || 0);
+    });
+}
+
+// Fault localization + ONE-BUG-AT-A-TIME correction. On a functional failure:
+// test the not-yet-verified direct children (suspicion-ordered, STOP at the first
+// that fails); a failing child → recurse into it; all children pass → the bug is
+// this module's own logic → rebuild it. Re-test after each fix. `budget.ops` caps
+// total test/fix operations across the whole build to control cost.
+// Returns true if `entry` ends up functionally verified.
+async function localizeAndFix(llm, spec, entry, builtFiles, modByName, onProgress, budget, depth) {
+  depth = depth || 0;
+  const emit = (o) => { if (onProgress) onProgress(Object.assign({ type: "drill", depth: depth }, o)); };
+  const maxRounds = 3;
+  for (let round = 1; round <= maxRounds; round++) {
+    if (budget.ops <= 0) { emit({ module: entry.name, msg: "correction budget exhausted" }); break; }
+    budget.ops--;
+    const res = await funcTest(llm, spec, entry, builtFiles);
+    entry.funcTbPassed = res.passed;
+    entry.funcTbOutput = res.details;
+    if (res.passed === true) {
+      entry.verification = "functional"; entry.testbenched = true;
+      emit({ module: entry.name, result: "functional" });
+      return true;
+    }
+    if (res.passed === null) { emit({ module: entry.name, result: "inconclusive", details: res.details }); return false; }
+
+    emit({ module: entry.name, result: "failed", details: res.details });
+    // Localize: test suspects, stop at the first failure (one bug at a time).
+    const candidates = suspectChildren(entry, modByName);
+    let culprit = null;
+    for (const child of candidates) {
+      if (budget.ops <= 0) break;
+      budget.ops--;
+      emit({ module: child.name, msg: "testing child of " + entry.name });
+      const cres = await funcTest(llm, spec, child, builtFiles);
+      child.funcTbPassed = cres.passed; child.funcTbOutput = cres.details;
+      if (cres.passed === true) {
+        child.verification = "functional"; child.testbenched = true;
+        emit({ module: child.name, result: "functional" });
+      } else if (cres.passed === false) {
+        culprit = child; // stop at first failure
+        emit({ module: child.name, result: "failed", details: cres.details });
+        break;
+      } // inconclusive child → skip
+    }
+    if (culprit) {
+      emit({ module: culprit.name, msg: "localized culprit — correcting it" });
+      await localizeAndFix(llm, spec, culprit, builtFiles, modByName, onProgress, budget, depth + 1);
+      // loop: re-test `entry` now that the child is (hopefully) fixed
+    } else {
+      emit({ module: entry.name, msg: "bug is in own logic — rebuilding" });
+      const fixed = await fixModuleFunctional(llm, spec, entry, builtFiles);
+      if (fixed) builtFiles[entry.name] = fixed;
+      else { emit({ module: entry.name, result: "unfixable" }); return false; }
+      // loop: re-test `entry` with the corrected code
+    }
+  }
+  return false;
+}
+
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
 async function buildDesign(llm, spec, onProgress) {
   const modules = await planGraph(llm, spec);
@@ -374,12 +495,16 @@ async function buildDesign(llm, spec, onProgress) {
   // testbenched stays false until the simulation layer is wired to run testbenches.
   const manifest = order.concat(cycle).map((m) => ({
     name: m.name,
+    purpose: m.purpose || "",
     built: false,
     testbenched: false,
     dependsOn: (m.dependsOn || []).slice(),
   }));
   const manifestByName = {};
   manifest.forEach((x) => (manifestByName[x.name] = x));
+  // Build-wide budget for functional-correction operations (test/fix), so a
+  // pathological design can't spawn unbounded LLM calls.
+  const fixBudget = { ops: 20 };
 
   const builtFiles = {};
   const results = [];
@@ -412,6 +537,7 @@ async function buildDesign(llm, spec, onProgress) {
         entry.features = features;
         entry.hasComputation = features.hasComputation;
         entry.tier = tier;
+        entry.summary = summary; // used by the functional oracle + drill-down
       }
       if (onProgress)
         onProgress({ type: "summary", module: mod.name, summary, complexity: finalScore });
@@ -458,26 +584,18 @@ async function buildDesign(llm, spec, onProgress) {
           const smokeOk = smokePassed !== false;
           entry.verification = structuralOk && smokeOk ? "smoke" : "unverified";
         } else {
-          // FUNCTIONAL ORACLE TESTBENCH: the LLM writes a self-checking testbench
-          // from the CONTRACT (spec + summary), NOT the code, so it's an independent
-          // oracle. Passing it (plus structural checks) makes the module 'functional'.
-          let funcPassed = null, funcMarkers = "";
-          try {
-            const ftb = await genFunctionalTestbench(llm, mod, spec, summary);
-            if (ftb && ftb.code) {
-              const simFiles = floorFiles.slice();
-              simFiles.push({ name: "func_tb.v", code: ftb.code });
-              const sim = await runTestbench(simFiles, ftb.top);
-              funcMarkers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") ||
-                sim.output.split("\n").slice(-2).join(" ")).slice(0, 400);
-              if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) funcPassed = true;
-              else if (/FUNC_FAIL/.test(sim.output)) funcPassed = false;
-              else funcPassed = null; // inconclusive: testbench didn't compile/run
-            }
-          } catch (e) { funcMarkers = String((e && e.message) || e); }
-          entry.funcTbPassed = funcPassed;      // true | false | null (inconclusive)
-          entry.funcTbOutput = funcMarkers;
-          entry.verification = structuralOk && funcPassed === true ? "functional" : "unverified";
+          // FUNCTIONAL ORACLE TESTBENCH + fault localization & correction.
+          // Runs the oracle test; on failure it localizes the culprit (one bug at a
+          // time, skipping verified children, suspicion-ordered) and rebuilds it,
+          // then re-tests. Only runs if the module is structurally sound.
+          if (structuralOk) {
+            try {
+              await localizeAndFix(llm, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
+            } catch (e) { entry.funcTbOutput = String((e && e.message) || e); }
+            entry.verification = entry.verification === "functional" ? "functional" : "unverified";
+          } else {
+            entry.verification = "unverified"; // not synthesizable/lint-clean → can't be functional
+          }
         }
         entry.testbenched = entry.verification === "functional";
         if (onProgress)

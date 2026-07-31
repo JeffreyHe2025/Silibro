@@ -1714,6 +1714,20 @@
         consoleLog("   → functional tier " + (ev.verification === "functional" ? "VERIFIED ✓" : "not verified ✗"),
           ev.verification === "functional" ? "ok" : "warn");
       }
+    } else if (ev.type === "drill") {
+      var pad = "   " + new Array((ev.depth || 0) + 1).join("  ");
+      if (ev.result === "functional") {
+        consoleLog(pad + "✓ " + ev.module + " functionally verified", "ok");
+      } else if (ev.result === "failed") {
+        consoleLog(pad + "✗ " + ev.module + " functional test FAILED — localizing…" +
+          (ev.details ? " (" + String(ev.details).split(";")[0] + ")" : ""), "error");
+      } else if (ev.result === "inconclusive") {
+        consoleLog(pad + "• " + ev.module + " functional test inconclusive (couldn't compile/run)", "warn");
+      } else if (ev.result === "unfixable") {
+        consoleLog(pad + "✗ " + ev.module + " could not be auto-corrected", "error");
+      } else if (ev.msg) {
+        consoleLog(pad + "↳ " + ev.module + ": " + ev.msg, "info");
+      }
     } else if (ev.type === "reviewing") {
       consoleLog("🔎 Verifier reviewing " + ev.count + " module summary/summaries against the spec…", "info");
     } else if (ev.type === "built" && !ev.ok) {
