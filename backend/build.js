@@ -317,6 +317,51 @@ async function summarizeModule(llm, mod, code) {
   }
 }
 
+// Pick the testbench's top module name from generated TB code (the module that
+// isn't the DUT), so we can elaborate it even if the LLM named it unexpectedly.
+function tbTopName(code, dutName) {
+  const names = [];
+  const re = /\bmodule\s+(\w+)/g;
+  let m;
+  while ((m = re.exec(code || ""))) names.push(m[1]);
+  return names.find((n) => n !== dutName) || "tb_" + dutName;
+}
+
+// FUNCTIONAL ORACLE TESTBENCH (higher tiers). The LLM writes a self-checking
+// testbench from the module's CONTRACT (spec + interface + intended function) —
+// NOT its implementation — so the oracle is independent of the code. It drives
+// representative + edge inputs, computes expected outputs FROM THE SPEC, and
+// checks them, printing FUNC_PASS / FUNC_FAIL. Returns { code, top } or null.
+async function genFunctionalTestbench(llm, mod, spec, summary) {
+  const ports = (summary && summary.ports) || [];
+  const params = (summary && summary.parameters) || [];
+  const clockReset = (summary && summary.clockReset) || {};
+  const intended = (summary && summary.intendedFunction) || mod.purpose || "";
+  const sys =
+    "You are a hardware verification engineer. Write a SELF-CHECKING Verilog testbench for a module you must " +
+    "NOT modify or redefine. You are given ONLY the module's interface and its intended behavior (the spec) — " +
+    "you do NOT see its implementation, so your test is an INDEPENDENT oracle. The testbench MUST: " +
+    "(1) instantiate the module by its exact name and port names; " +
+    "(2) generate a clock and apply the reset sequence if the module is sequential; " +
+    "(3) drive a range of representative inputs AND edge cases; " +
+    "(4) for each, compute the EXPECTED output from the specification and compare it to the actual output; " +
+    "(5) on a mismatch, print a line starting with 'FUNC_FAIL' including inputs, expected, and actual; " +
+    "(6) at the very end, print 'FUNC_PASS' only if every check passed; (7) call $finish. " +
+    "Name the testbench module 'tb_" + mod.name + "'. Output ONLY the testbench inside a ```verilog code block — " +
+    "no prose, and do NOT include the module under test.";
+  const user =
+    "Module under test: " + mod.name + "\n" +
+    "Ports: " + JSON.stringify(ports) + "\n" +
+    "Parameters: " + JSON.stringify(params) + "\n" +
+    "Clock/reset: " + JSON.stringify(clockReset) + "\n" +
+    "Intended function: " + intended + "\n\n" +
+    "Full design specification (the source of truth for expected outputs):\n" + spec;
+  const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+  const code = extractVerilog(reply);
+  if (!code) return null;
+  return { code: code, top: tbTopName(code, mod.name) };
+}
+
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
 async function buildDesign(llm, spec, onProgress) {
   const modules = await planGraph(llm, spec);
@@ -377,49 +422,63 @@ async function buildDesign(llm, spec, onProgress) {
       //   verification: 'unverified' | 'smoke' | 'functional'
       //   Only 'functional' counts as trusted for pruning / fault isolation.
       if (entry) {
-        if (tier === "smoke") {
-          const floorFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
-          // Floor tier = structural lint + GENERIC SYNTHESIS (default for every
-          // floor-level module). Run both; they're local tools ($0, no API).
-          const lint = await lintVerilog(floorFiles, mod.name);
-          const synth = await synthCheck(floorFiles, mod.name);
-          entry.lintClean = lint.clean;
-          entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
-          entry.synthesizable = synth.synthesizable; // true | false | null (yosys absent)
-          entry.synthAvailable = synth.available;
-          entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
+        const floorFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
 
-          // Floor SMOKE TESTBENCH (code-generated, NO oracle): clock/reset gen +
-          // random stimulus + X-check on outputs. Catches undriven/uninitialized
-          // outputs, incomplete logic. Runs the module + its built deps + the TB.
+        // STRUCTURAL checks on EVERY module (both tiers) — lint + GENERIC SYNTHESIS.
+        // Synthesizability is universal, so it runs for all built modules. $0, local.
+        const lint = await lintVerilog(floorFiles, mod.name);
+        const synth = await synthCheck(floorFiles, mod.name);
+        entry.lintClean = lint.clean;
+        entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
+        entry.synthesizable = synth.synthesizable; // true | false | null (yosys absent)
+        entry.synthAvailable = synth.available;
+        entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
+        const synthOk = synth.available ? synth.synthesizable === true : true;
+        const structuralOk = lint.clean && synthOk;
+
+        if (tier === "smoke") {
+          // SMOKE TESTBENCH (code-generated, NO oracle): clock/reset + random
+          // stimulus + X-check. Catches undriven/uninitialized/incomplete outputs.
           let smokePassed = null, smokeMarkers = "";
           try {
             const iface = parseInterface(r.code);
             if (iface) {
               const stb = genSmokeTestbench(iface);
-              const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+              const simFiles = floorFiles.slice();
               simFiles.push({ name: "smoke_tb.v", code: stb.code });
               const sim = await runTestbench(simFiles, stb.top);
               smokeMarkers = (sim.output.match(/SMOKE_[A-Z]+[^\n]*/g) || []).join("; ").slice(0, 400);
               if (/SMOKE_PASS/.test(sim.output)) smokePassed = true;
               else if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) smokePassed = false;
-              else smokePassed = sim.ok ? null : false; // inconclusive vs couldn't run
+              else smokePassed = sim.ok ? null : false;
             }
           } catch (e) { smokeMarkers = String((e && e.message) || e); }
-          entry.smokeSimPassed = smokePassed;   // true | false | null (inconclusive)
+          entry.smokeSimPassed = smokePassed;
           entry.smokeSimOutput = smokeMarkers;
-
-          // Floor passes => 'smoke' only if lint is clean AND generic synthesis
-          // succeeds AND the smoke sim didn't hard-fail. Missing tools / inconclusive
-          // sim don't block (they degrade), only a real failure does.
-          const synthOk = synth.available ? synth.synthesizable === true : true;
           const smokeOk = smokePassed !== false;
-          entry.verification = lint.clean && synthOk && smokeOk ? "smoke" : "unverified";
+          entry.verification = structuralOk && smokeOk ? "smoke" : "unverified";
         } else {
-          // functional tier — the oracle testbench isn't built yet (TODO).
-          entry.verification = "unverified";
+          // FUNCTIONAL ORACLE TESTBENCH: the LLM writes a self-checking testbench
+          // from the CONTRACT (spec + summary), NOT the code, so it's an independent
+          // oracle. Passing it (plus structural checks) makes the module 'functional'.
+          let funcPassed = null, funcMarkers = "";
+          try {
+            const ftb = await genFunctionalTestbench(llm, mod, spec, summary);
+            if (ftb && ftb.code) {
+              const simFiles = floorFiles.slice();
+              simFiles.push({ name: "func_tb.v", code: ftb.code });
+              const sim = await runTestbench(simFiles, ftb.top);
+              funcMarkers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") ||
+                sim.output.split("\n").slice(-2).join(" ")).slice(0, 400);
+              if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) funcPassed = true;
+              else if (/FUNC_FAIL/.test(sim.output)) funcPassed = false;
+              else funcPassed = null; // inconclusive: testbench didn't compile/run
+            }
+          } catch (e) { funcMarkers = String((e && e.message) || e); }
+          entry.funcTbPassed = funcPassed;      // true | false | null (inconclusive)
+          entry.funcTbOutput = funcMarkers;
+          entry.verification = structuralOk && funcPassed === true ? "functional" : "unverified";
         }
-        // 'functional' is set only by the (future) oracle tier; testbenched mirrors it.
         entry.testbenched = entry.verification === "functional";
         if (onProgress)
           onProgress({
@@ -434,6 +493,8 @@ async function buildDesign(llm, spec, onProgress) {
             synthReason: entry.synthOutput ? String(entry.synthOutput).split("\n")[0] : "",
             smokeSimPassed: entry.smokeSimPassed,
             smokeSimReason: entry.smokeSimOutput || "",
+            funcTbPassed: entry.funcTbPassed,
+            funcTbReason: entry.funcTbOutput || "",
           });
       }
     }

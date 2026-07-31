@@ -1676,35 +1676,43 @@
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
     } else if (ev.type === "floor") {
+      consoleLog("🧪 " + ev.module + " — " + ev.tier + " tier checks:", "info");
+      // Lint (all modules)
+      if (ev.lintClean) {
+        consoleLog("   • lint: clean ✓", "ok");
+      } else {
+        consoleLog("   • lint: issues ✗" + (ev.lintReason ? " — " + ev.lintReason : ""), "error");
+      }
+      // Generic synthesis (all modules)
+      if (ev.synthAvailable === false) {
+        consoleLog("   • synthesis: skipped (yosys not installed) — sim-only scan still ran", "warn");
+      } else if (ev.synthesizable === true) {
+        consoleLog("   • synthesis: synthesizable ✓", "ok");
+      } else if (ev.synthesizable === false) {
+        consoleLog("   • synthesis: NOT synthesizable ✗" + (ev.synthReason ? " — " + ev.synthReason : ""), "error");
+      }
       if (ev.tier === "smoke") {
-        consoleLog("🧪 " + ev.module + " — floor tier checks:", "info");
-        // Lint result
-        if (ev.lintClean) {
-          consoleLog("   • lint: clean ✓", "ok");
-        } else {
-          consoleLog("   • lint: issues ✗" + (ev.lintReason ? " — " + ev.lintReason : ""), "error");
-        }
-        // Generic synthesis result
-        if (ev.synthAvailable === false) {
-          consoleLog("   • synthesis: skipped (yosys not installed) — sim-only scan still ran", "warn");
-        } else if (ev.synthesizable === true) {
-          consoleLog("   • synthesis: synthesizable ✓", "ok");
-        } else if (ev.synthesizable === false) {
-          consoleLog("   • synthesis: NOT synthesizable ✗" + (ev.synthReason ? " — " + ev.synthReason : ""), "error");
-        }
-        // Floor-level testbench result (code-generated, no oracle)
+        // Smoke testbench (code-generated, no oracle)
         if (ev.smokeSimPassed === true) {
-          consoleLog("   • floor testbench: PASSED ✓ (no undefined outputs)", "ok");
+          consoleLog("   • smoke testbench: PASSED ✓ (no undefined outputs)", "ok");
         } else if (ev.smokeSimPassed === false) {
-          consoleLog("   • floor testbench: FAILED ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
+          consoleLog("   • smoke testbench: FAILED ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
         } else {
-          consoleLog("   • floor testbench: inconclusive (couldn't parse/run)", "warn");
+          consoleLog("   • smoke testbench: inconclusive (couldn't parse/run)", "warn");
         }
-        // Overall floor verdict
         consoleLog("   → floor tier " + (ev.verification === "smoke" ? "PASSED ✓" : "FAILED ✗"),
           ev.verification === "smoke" ? "ok" : "error");
       } else {
-        consoleLog("🧪 " + ev.module + " — functional tier (needs an oracle testbench; not built yet)", "info");
+        // Functional oracle testbench (LLM-written, checks against the spec)
+        if (ev.funcTbPassed === true) {
+          consoleLog("   • functional testbench (oracle): PASSED ✓", "ok");
+        } else if (ev.funcTbPassed === false) {
+          consoleLog("   • functional testbench (oracle): FAILED ✗" + (ev.funcTbReason ? " — " + ev.funcTbReason : ""), "error");
+        } else {
+          consoleLog("   • functional testbench (oracle): inconclusive (couldn't compile/run)", "warn");
+        }
+        consoleLog("   → functional tier " + (ev.verification === "functional" ? "VERIFIED ✓" : "not verified ✗"),
+          ev.verification === "functional" ? "ok" : "warn");
       }
     } else if (ev.type === "reviewing") {
       consoleLog("🔎 Verifier reviewing " + ev.count + " module summary/summaries against the spec…", "info");
@@ -1926,10 +1934,13 @@
         // Build a tooltip describing the floor checks (lint + generic synthesis).
         var vtip = [];
         if (v === "smoke") vtip.push("floor passed: lint + generic synthesis + smoke testbench; function NOT yet proven");
+        if (v === "functional") vtip.push("functionally verified: lint + generic synthesis + oracle testbench PASSED");
         if (m.synthesizable === false) vtip.push("generic synthesis FAILED (not buildable hardware)");
         else if (m.synthAvailable === false) vtip.push("synth skipped (yosys not installed)");
         if (m.smokeSimPassed === false) vtip.push("smoke testbench FAILED: " + (m.smokeSimOutput || "undefined output"));
         else if (m.smokeSimPassed === true) vtip.push("smoke testbench: no undefined outputs");
+        if (m.funcTbPassed === false) vtip.push("functional oracle testbench FAILED: " + (m.funcTbOutput || "mismatch vs spec"));
+        else if (m.funcTbPassed === true) vtip.push("functional oracle testbench PASSED");
         if (m.lintOutput) vtip.push("lint: " + m.lintOutput);
         if (m.synthOutput && m.synthesizable === false) vtip.push("synth: " + m.synthOutput);
         if (vtip.length) tbTd.title = vtip.join("\n");
