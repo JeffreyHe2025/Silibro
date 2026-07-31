@@ -63,6 +63,8 @@
   var authToggleLink = $("auth-toggle-link");
 
   var signOutBtn = $("sign-out");
+  var signInBtn = $("sign-in");
+  var authGuestLink = $("auth-guest-link");
 
   var newProjectBtn = $("new-project");
   var projectList = $("project-list");
@@ -156,6 +158,147 @@
     "",
     "endmodule",
   ].join("\n");
+
+  // ---------------------------------------------------------------------------
+  // Storage layer — Supabase when signed in, browser localStorage when a guest.
+  // Sign-in is OPTIONAL: guests can use everything; their work is saved locally
+  // (this browser only). Signing in saves to the cloud account instead.
+  // Every method resolves to { data, error } to match Supabase's shape.
+  // ---------------------------------------------------------------------------
+  var GUEST = true; // flipped to false once a session is present
+  function newId() {
+    return (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : "g-" + Date.now().toString(36) + Math.random().toString(16).slice(2, 8);
+  }
+  function lsGet(k, d) { try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
+  function lsSet(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+  var GK_PROJECTS = "guest_projects";
+  var GK_CONVOS = "guest_conversations";
+  function gkFiles(pid) { return "guest_files_" + pid; }
+  function nowISO() { return new Date().toISOString(); }
+  // Find a guest file by id across all guest projects → { key, arr, idx } or null.
+  function guestFindFile(id) {
+    var ps = lsGet(GK_PROJECTS, []);
+    for (var i = 0; i < ps.length; i++) {
+      var key = gkFiles(ps[i].id);
+      var arr = lsGet(key, []);
+      var idx = arr.findIndex(function (f) { return f.id === id; });
+      if (idx >= 0) return { key: key, arr: arr, idx: idx };
+    }
+    return null;
+  }
+
+  // --- Projects ---
+  async function dbListProjects() {
+    if (GUEST) {
+      var ps = lsGet(GK_PROJECTS, []).slice();
+      ps.sort(function (a, b) { return String(b.updated_at || "").localeCompare(String(a.updated_at || "")); });
+      return { data: ps, error: null };
+    }
+    return await sb.from("projects").select("id, name, updated_at").order("updated_at", { ascending: false });
+  }
+  async function dbCreateProject(name) {
+    if (GUEST) {
+      var p = { id: newId(), name: name, updated_at: nowISO() };
+      var ps = lsGet(GK_PROJECTS, []); ps.unshift(p); lsSet(GK_PROJECTS, ps);
+      lsSet(gkFiles(p.id), []);
+      return { data: p, error: null };
+    }
+    return await sb.from("projects").insert({ name: name }).select("id, name, updated_at").single();
+  }
+  async function dbRenameProject(id, name) {
+    if (GUEST) {
+      var ps = lsGet(GK_PROJECTS, []); var p = ps.find(function (x) { return x.id === id; });
+      if (p) { p.name = name; p.updated_at = nowISO(); lsSet(GK_PROJECTS, ps); }
+      return { error: null };
+    }
+    return await sb.from("projects").update({ name: name }).eq("id", id);
+  }
+  async function dbDeleteProject(id) {
+    if (GUEST) {
+      lsSet(GK_PROJECTS, lsGet(GK_PROJECTS, []).filter(function (x) { return x.id !== id; }));
+      localStorage.removeItem(gkFiles(id));
+      return { error: null };
+    }
+    return await sb.from("projects").delete().eq("id", id);
+  }
+
+  // --- Files ---
+  async function dbListFiles(pid) {
+    if (GUEST) {
+      var arr = lsGet(gkFiles(pid), []).slice();
+      arr.sort(function (a, b) { return String(a.name || "").localeCompare(String(b.name || "")); });
+      return { data: arr, error: null };
+    }
+    return await sb.from("files").select("id, name, code").eq("project_id", pid).order("name", { ascending: true });
+  }
+  async function dbCreateFile(pid, name, code) {
+    if (GUEST) {
+      var f = { id: newId(), name: name, code: code || "" };
+      var arr = lsGet(gkFiles(pid), []); arr.push(f); lsSet(gkFiles(pid), arr);
+      return { data: f, error: null };
+    }
+    return await sb.from("files").insert({ project_id: pid, name: name, code: code }).select("id, name, code").single();
+  }
+  async function dbUpdateFile(id, fields) {
+    if (GUEST) {
+      var loc = guestFindFile(id);
+      if (!loc) return { data: null, error: { message: "file not found" } };
+      Object.assign(loc.arr[loc.idx], fields);
+      lsSet(loc.key, loc.arr);
+      return { data: loc.arr[loc.idx], error: null };
+    }
+    return await sb.from("files").update(fields).eq("id", id).select("id, name, code").single();
+  }
+  async function dbDeleteFile(id) {
+    if (GUEST) {
+      var loc = guestFindFile(id);
+      if (loc) { loc.arr.splice(loc.idx, 1); lsSet(loc.key, loc.arr); }
+      return { error: null };
+    }
+    return await sb.from("files").delete().eq("id", id);
+  }
+
+  // --- Conversations (chat history) ---
+  async function dbListConversations() {
+    if (GUEST) {
+      var cs = lsGet(GK_CONVOS, []).map(function (c) { return { id: c.id, title: c.title, updated_at: c.updated_at }; });
+      cs.sort(function (a, b) { return String(b.updated_at || "").localeCompare(String(a.updated_at || "")); });
+      return { data: cs, error: null };
+    }
+    return await sb.from("conversations").select("id, title, updated_at").order("updated_at", { ascending: false });
+  }
+  async function dbGetConversation(id) {
+    if (GUEST) {
+      var c = lsGet(GK_CONVOS, []).find(function (x) { return x.id === id; });
+      return { data: c ? { id: c.id, messages: c.messages } : null, error: c ? null : { message: "not found" } };
+    }
+    return await sb.from("conversations").select("id, messages").eq("id", id).single();
+  }
+  async function dbCreateConversation(rec) {
+    if (GUEST) {
+      var c = { id: newId(), title: rec.title, provider: rec.provider, model: rec.model, messages: rec.messages, updated_at: nowISO() };
+      var cs = lsGet(GK_CONVOS, []); cs.unshift(c); lsSet(GK_CONVOS, cs);
+      return { data: { id: c.id }, error: null };
+    }
+    return await sb.from("conversations").insert(rec).select("id").single();
+  }
+  async function dbUpdateConversation(id, fields) {
+    if (GUEST) {
+      var cs = lsGet(GK_CONVOS, []); var c = cs.find(function (x) { return x.id === id; });
+      if (c) { Object.assign(c, fields); c.updated_at = nowISO(); lsSet(GK_CONVOS, cs); }
+      return { error: null };
+    }
+    return await sb.from("conversations").update(fields).eq("id", id);
+  }
+  async function dbDeleteConversation(id) {
+    if (GUEST) {
+      lsSet(GK_CONVOS, lsGet(GK_CONVOS, []).filter(function (x) { return x.id !== id; }));
+      return { error: null };
+    }
+    return await sb.from("conversations").delete().eq("id", id);
+  }
 
   // ---------------------------------------------------------------------------
   // Editor
@@ -320,7 +463,10 @@
   // ---------------------------------------------------------------------------
   // View switching
   // ---------------------------------------------------------------------------
-  function showApp(session) {
+  // Enter the app. session === null → GUEST mode (localStorage); a session → signed
+  // in (cloud/Supabase). Sign-in is optional; guests can use everything.
+  function enterApp(session) {
+    GUEST = !session;
     authView.classList.add("hidden");
     appView.classList.remove("hidden");
     userArea.classList.remove("hidden");
@@ -330,35 +476,41 @@
     chatPanel.classList.remove("hidden");
     consolePanel.classList.remove("hidden"); // permanent bottom-docked console
     consoleToggle.classList.add("hidden");
-    userEmail.textContent = session.user.email;
+    if (session) {
+      userEmail.textContent = session.user.email;
+      userEmail.classList.remove("hidden");
+      signOutBtn.classList.remove("hidden");
+      signInBtn.classList.add("hidden");
+    } else {
+      userEmail.textContent = "";
+      userEmail.classList.add("hidden");
+      signOutBtn.classList.add("hidden");
+      signInBtn.classList.remove("hidden");
+    }
+    // Reset selection when switching between accounts / guest.
+    projects = [];
+    files = [];
+    currentProjectId = null;
+    currentFileId = null;
+    filesSection.classList.add("hidden");
+    closeEditorPanel();
     initEditor();
     loadProjects();
     loadConversations();
     renderChatView();
   }
 
-  function showAuth() {
+  // Show the sign-in screen (from the "Sign in to save" button). Guest work in
+  // localStorage is untouched; "Continue without signing in" returns to it.
+  function openSignIn() {
     appView.classList.add("hidden");
-    appView.classList.remove("sidebar-collapsed");
-    userArea.classList.add("hidden");
-    toggleSidebarBtn.classList.add("hidden");
-    document.body.classList.remove("chat-docked");
-    chatToggle.classList.add("hidden");   // hide the AI widget on the login screen
     chatPanel.classList.add("hidden");
-    consoleToggle.classList.add("hidden");
     consolePanel.classList.add("hidden");
     authView.classList.remove("hidden");
-    projects = [];
-    files = [];
-    currentProjectId = null;
-    currentFileId = null;
-    projectList.innerHTML = "";
-    fileList.innerHTML = "";
-    filesSection.classList.add("hidden");
-    closeEditorPanel();
     authEmail.value = "";
     authPassword.value = "";
     setAuthMode("signin");
+    setAuthMessage("");
   }
 
   // ---------------------------------------------------------------------------
@@ -387,14 +539,11 @@
   }
 
   function loadProjects() {
-    sb.from("projects")
-      .select("id, name, updated_at")
-      .order("updated_at", { ascending: false })
-      .then(function (res) {
-        if (res.error) { alert("Could not load projects: " + res.error.message); return; }
-        projects = res.data || [];
-        renderProjectList();
-      });
+    dbListProjects().then(function (res) {
+      if (res.error) { alert("Could not load projects: " + res.error.message); return; }
+      projects = res.data || [];
+      renderProjectList();
+    });
   }
 
   function openProject(id) {
@@ -411,35 +560,27 @@
 
   newProjectBtn.addEventListener("click", function () {
     newProjectBtn.disabled = true;
-    sb.from("projects")
-      .insert({ name: "Untitled project" })
-      .select("id, name, updated_at")
-      .single()
-      .then(function (res) {
-        if (res.error) {
-          newProjectBtn.disabled = false;
-          alert("Could not create project: " + res.error.message);
-          return;
-        }
-        var project = res.data;
-        projects.unshift(project);
-        // Seed the project with one starter file.
-        return sb.from("files")
-          .insert({ project_id: project.id, name: "top.v", code: STARTER_CODE })
-          .select("id, name, code")
-          .single()
-          .then(function (fres) {
-            newProjectBtn.disabled = false;
-            if (fres.error) { alert("Could not create file: " + fres.error.message); }
-            currentProjectId = project.id;
-            projectNameInput.value = project.name;
-            filesSection.classList.remove("hidden");
-            renderProjectList();
-            files = fres.data ? [fres.data] : [];
-            renderFileList();
-            if (files.length) openFile(files[0].id);
-          });
+    dbCreateProject("Untitled project").then(function (res) {
+      if (res.error) {
+        newProjectBtn.disabled = false;
+        alert("Could not create project: " + res.error.message);
+        return;
+      }
+      var project = res.data;
+      projects.unshift(project);
+      // Seed the project with one starter file.
+      return dbCreateFile(project.id, "top.v", STARTER_CODE).then(function (fres) {
+        newProjectBtn.disabled = false;
+        if (fres.error) { alert("Could not create file: " + fres.error.message); }
+        currentProjectId = project.id;
+        projectNameInput.value = project.name;
+        filesSection.classList.remove("hidden");
+        renderProjectList();
+        files = fres.data ? [fres.data] : [];
+        renderFileList();
+        if (files.length) openFile(files[0].id);
       });
+    });
   });
 
   // Rename project on edit.
@@ -447,22 +588,19 @@
     if (currentProjectId == null) return;
     var name = projectNameInput.value.trim() || "Untitled project";
     projectNameInput.value = name;
-    sb.from("projects")
-      .update({ name: name })
-      .eq("id", currentProjectId)
-      .then(function (res) {
-        if (res.error) { alert("Could not rename project: " + res.error.message); return; }
-        var p = projects.find(function (x) { return x.id === currentProjectId; });
-        if (p) p.name = name;
-        renderProjectList();
-      });
+    dbRenameProject(currentProjectId, name).then(function (res) {
+      if (res.error) { alert("Could not rename project: " + res.error.message); return; }
+      var p = projects.find(function (x) { return x.id === currentProjectId; });
+      if (p) p.name = name;
+      renderProjectList();
+    });
   });
 
   deleteProjectBtn.addEventListener("click", function () {
     if (currentProjectId == null) return;
     if (!confirm("Delete this project and ALL its files? This cannot be undone.")) return;
     var id = currentProjectId;
-    sb.from("projects").delete().eq("id", id).then(function (res) {
+    dbDeleteProject(id).then(function (res) {
       if (res.error) { alert("Could not delete project: " + res.error.message); return; }
       projects = projects.filter(function (p) { return p.id !== id; });
       currentProjectId = null;
@@ -576,11 +714,7 @@
   }
 
   function loadFiles(projectId) {
-    sb.from("files")
-      .select("id, name, code")
-      .eq("project_id", projectId)
-      .order("name", { ascending: true })
-      .then(function (res) {
+    dbListFiles(projectId).then(function (res) {
         if (res.error) { alert("Could not load files: " + res.error.message); return; }
         files = res.data || [];
         renderFileList();
@@ -682,11 +816,7 @@
     if (!input) return;                 // empty
     var name = uniqueFileName(input);
     newFileBtn.disabled = true;
-    sb.from("files")
-      .insert({ project_id: currentProjectId, name: name, code: "" })
-      .select("id, name, code")
-      .single()
-      .then(function (res) {
+    dbCreateFile(currentProjectId, name, "").then(function (res) {
         newFileBtn.disabled = false;
         if (res.error) { alert("Could not create file: " + res.error.message); return; }
         files.push(res.data);
@@ -728,9 +858,7 @@
         var file = picked[i];
         var text = await file.text();
         var name = uniqueFileName(file.name || "untitled.txt");
-        var res = await sb.from("files")
-          .insert({ project_id: currentProjectId, name: name, code: text })
-          .select("id, name, code").single();
+        var res = await dbCreateFile(currentProjectId, name, text);
         if (!res.error) {
           files.push(res.data);
           imported.push(res.data);
@@ -774,7 +902,7 @@
     var saved = 0;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      var res = await sb.from("files").update({ name: f.name, code: f.code }).eq("id", f.id);
+      var res = await dbUpdateFile(f.id, { name: f.name, code: f.code });
       if (!res.error) saved++;
     }
     return saved;
@@ -837,12 +965,7 @@
     saveBtn.disabled = true;
     var label = saveBtn.textContent;
     saveBtn.textContent = "Saving…";
-    sb.from("files")
-      .update({ name: name, code: code })
-      .eq("id", currentFileId)
-      .select("id, name, code")
-      .single()
-      .then(function (res) {
+    dbUpdateFile(currentFileId, { name: name, code: code }).then(function (res) {
         saveBtn.disabled = false;
         if (res.error) {
           saveBtn.textContent = label;
@@ -1129,7 +1252,7 @@
   function doDeleteFile(id) {
     var f = files.find(function (x) { return x.id === id; });
     if (!f) return;
-    sb.from("files").delete().eq("id", id).then(function (res) {
+    dbDeleteFile(id).then(function (res) {
       if (res.error) { alert("Could not delete file: " + res.error.message); return; }
       files = files.filter(function (x) { return x.id !== id; });
       if (currentFileId === id) {
@@ -1430,7 +1553,7 @@
   async function ensureProject(namingText, namingImages) {
     if (currentProjectId != null) return true;
     var initialName = "Generating name...";
-    var res = await sb.from("projects").insert({ name: initialName }).select("id, name, updated_at").single();
+    var res = await dbCreateProject(initialName);
     if (res.error) {
       alert("Could not create project: " + res.error.message);
       return false;
@@ -1460,7 +1583,7 @@
         var reply = await callLLM(provider, key, model, sys, [namingMsg]);
         var generatedName = reply.trim().replace(/^["']|["']$/g, "").slice(0, 50);
         if (generatedName && currentProjectId === project.id) {
-          await sb.from("projects").update({ name: generatedName }).eq("id", project.id);
+          await dbRenameProject(project.id, generatedName);
           project.name = generatedName;
           projectNameInput.value = generatedName;
           renderProjectList();
@@ -2400,9 +2523,7 @@
   }
 
   async function loadConversations() {
-    var res = await sb.from("conversations")
-      .select("id, title, updated_at")
-      .order("updated_at", { ascending: false });
+    var res = await dbListConversations();
     conversations = res.data || [];
     renderHistoryList();
     if (chatHistory.length === 0 && conversations.length > 0 && currentConversationId == null) {
@@ -2443,7 +2564,7 @@
   }
 
   async function openConversation(id) {
-    var res = await sb.from("conversations").select("id, messages").eq("id", id).single();
+    var res = await dbGetConversation(id);
     if (res.error || !res.data) { alert("Couldn't open that chat."); return; }
     currentConversationId = id;
     localStorage.setItem("last_conversation_id", id);
@@ -2466,18 +2587,14 @@
     if (currentConversationId == null) {
       var firstUser = chatHistory.find(function (m) { return m.role === "user"; });
       var title = ((firstUser && firstUser.content) || "New chat").slice(0, 60);
-      var ins = await sb.from("conversations")
-        .insert({ title: title, provider: provider, model: model, messages: chatHistory })
-        .select("id").single();
+      var ins = await dbCreateConversation({ title: title, provider: provider, model: model, messages: chatHistory });
       if (!ins.error && ins.data) {
         currentConversationId = ins.data.id;
         localStorage.setItem("last_conversation_id", ins.data.id);
         loadConversations(); // refresh the list to show the new chat
       }
     } else {
-      await sb.from("conversations")
-        .update({ provider: provider, model: model, messages: chatHistory })
-        .eq("id", currentConversationId);
+      await dbUpdateConversation(currentConversationId, { provider: provider, model: model, messages: chatHistory });
     }
   }
 
@@ -2486,7 +2603,7 @@
     if (name == null) return; // cancelled
     name = name.trim();
     if (!name) return;
-    var res = await sb.from("conversations").update({ title: name }).eq("id", id);
+    var res = await dbUpdateConversation(id, { title: name });
     if (res.error) { alert("Couldn't rename: " + res.error.message); return; }
     var c = conversations.find(function (x) { return x.id === id; });
     if (c) c.title = name;
@@ -2495,7 +2612,7 @@
 
   async function deleteConversation(id) {
     if (!confirm("Delete this chat?")) return;
-    await sb.from("conversations").delete().eq("id", id);
+    await dbDeleteConversation(id);
     conversations = conversations.filter(function (c) { return c.id !== id; });
     if (currentConversationId === id) {
       currentConversationId = null;
@@ -2786,8 +2903,7 @@
       var content = edits[i].content;
       var existing = files.find(function (f) { return f.name === name; });
       if (existing) {
-        var ures = await sb.from("files").update({ name: name, code: content })
-          .eq("id", existing.id).select("id, name, code").single();
+        var ures = await dbUpdateFile(existing.id, { name: name, code: content });
         if (!ures.error) {
           existing.code = content; applied.push(name); consoleLog("🤖 updated " + name, "info");
           if (/^spec\.md$/i.test(name) && !isSpec(existing.id)) addSpec(existing.id);
@@ -2795,8 +2911,7 @@
           consoleLog("Failed to update " + name + ": " + ures.error.message, "error");
         }
       } else {
-        var ires = await sb.from("files").insert({ project_id: currentProjectId, name: name, code: content })
-          .select("id, name, code").single();
+        var ires = await dbCreateFile(currentProjectId, name, content);
         if (!ires.error) {
           files.push(ires.data); applied.push(name + " (new)"); consoleLog("🤖 created " + name, "ok");
           if (/^spec\.md$/i.test(name) && !isSpec(ires.data.id)) addSpec(ires.data.id);
@@ -3060,9 +3175,15 @@
   detectTopBtn.addEventListener("click", detectTopWithAI);
 
   signOutBtn.addEventListener("click", function () { sb.auth.signOut(); });
+  if (signInBtn) signInBtn.addEventListener("click", openSignIn);
+  if (authGuestLink) authGuestLink.addEventListener("click", function (e) {
+    e.preventDefault();
+    enterApp(null); // return to guest mode
+  });
 
   // ---------------------------------------------------------------------------
-  // Session bootstrap
+  // Session bootstrap — no forced sign-in. Guests get the app immediately
+  // (localStorage); signing in switches to the cloud account.
   // ---------------------------------------------------------------------------
   var lastUserId = undefined;
   sb.auth.onAuthStateChange(function (_event, session) {
@@ -3072,6 +3193,6 @@
     var uid = session ? session.user.id : null;
     if (uid === lastUserId) return;
     lastUserId = uid;
-    if (session) { showApp(session); } else { showAuth(); }
+    enterApp(session); // session may be null → guest mode
   });
 })();

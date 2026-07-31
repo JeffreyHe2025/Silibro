@@ -893,6 +893,9 @@ body.chat-docked #chat-expand { display: none; }
   margin-left: 4px;
 }
 .auth-toggle a:hover { text-decoration: underline; }
+.auth-guest { margin: 4px 0 0; text-align: center; }
+.auth-guest a { color: #6b7280; font-size: 13px; text-decoration: none; }
+.auth-guest a:hover { color: #111827; text-decoration: underline; }
 
 /* ---------- App view ---------- */
 .app-view {

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="styles.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -14,7 +14,8 @@
     </div>
     <div id="user-area" class="user-area hidden">
       <span id="user-email" class="user-email"></span>
-      <button id="sign-out" class="btn btn-small">Sign out</button>
+      <button id="sign-in" class="btn btn-small hidden" title="Sign in to save your projects to your account">Sign in to save</button>
+      <button id="sign-out" class="btn btn-small hidden">Sign out</button>
     </div>
   </header>
 
@@ -35,6 +36,9 @@
       <p class="auth-toggle">
         <span id="auth-toggle-text">Don't have an account?</span>
         <a id="auth-toggle-link" href="#">Sign up</a>
+      </p>
+      <p class="auth-guest">
+        <a id="auth-guest-link" href="#">← Continue without signing in</a>
       </p>
     </form>
   </section>
@@ -309,7 +313,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=3"></script>
-  <script src="app.js?v=3"></script>
+  <script src="config.js?v=4"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
