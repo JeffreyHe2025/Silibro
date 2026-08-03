@@ -362,6 +362,62 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
   return { code: code, top: tbTopName(code, mod.name) };
 }
 
+// Verifier spec-conformance check for ONE module, from its summary (not the code).
+// Checks ports/widths, intended behavior, and clock/reset style (sync vs async,
+// active level) against the spec. Returns { conforms:bool, issues } or null.
+async function checkConformance(llm, spec, mod, summary) {
+  const sys =
+    "You are the Verifier. Given the design spec and ONE module's summary (interface, intended " +
+    "function, and clock/reset conventions), decide whether the module CONFORMS to the spec. Check " +
+    "ports/widths, intended behavior, and ESPECIALLY the clock/reset style (synchronous vs " +
+    "asynchronous, active-high vs active-low). Return ONLY JSON: " +
+    '{"conforms": true|false, "issues": "<if false: the specific violations the Builder must fix; else empty>"}';
+  const user =
+    "Design spec:\n" + spec + "\n\nModule '" + mod.name + "' summary:\n" + JSON.stringify(summary, null, 2);
+  try {
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const s = reply.replace(/```json|```/g, "");
+    const obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
+    return { conforms: obj.conforms === true, issues: String(obj.issues || "") };
+  } catch (e) {
+    return null; // inconclusive — don't loop on a parse failure
+  }
+}
+
+// Rebuild a module to fix SPEC VIOLATIONS the Verifier found; compile-checked.
+// Returns corrected code or null.
+async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
+  const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
+  const depContext = depNames
+    .map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n])
+    .join("\n\n");
+  const sys =
+    "You are a Verilog module writer. A module you wrote VIOLATES the design specification. " +
+    "Rewrite ONLY the module '" + mod.name + "' to fix the violation(s), matching the spec's required " +
+    "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
+  let base =
+    "Design spec:\n" + spec +
+    "\n\nModule '" + mod.name + "' — " + (mod.purpose || "") +
+    " — has these SPEC VIOLATIONS to fix:\n" + issues +
+    "\n\nReturn a corrected version of '" + mod.name + "' that conforms to the spec.";
+  if (depContext)
+    base += "\n\nIt instantiates these already-built modules (do NOT redefine them):\n\n" + depContext;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const user = base + (lastErr ? "\n\nYour previous attempt failed to COMPILE:\n" + lastErr + "\n\nReturn a corrected, compiling version." : "");
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const code = extractVerilog(reply);
+    const files = Object.keys(builtFiles)
+      .filter((n) => n !== mod.name)
+      .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+    files.push({ name: mod.name + ".v", code });
+    const res = await compileVerilog(files, mod.name);
+    if (res.ok) return code;
+    lastErr = res.output;
+  }
+  return null;
+}
+
 // Run one module's functional oracle test. Returns { passed:true|false|null, details }.
 async function funcTest(llm, spec, entry, builtFiles) {
   const ftb = await genFunctionalTestbench(
@@ -514,20 +570,40 @@ async function buildDesign(llm, spec, onProgress) {
     const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest);
     if (r.ok) {
       builtFiles[r.name] = r.code;
-      // Complexity: TWO independent estimates, then averaged.
-      //   codeScore  — deterministic formula over the static feature vector
-      //   llmScore   — the LLM's own 1–100 from reading the full module (no baseline shown)
+      const entry = manifestByName[mod.name];
+
+      // Builder describes the module for the Verifier (summary, NOT the code).
+      let summary = await summarizeModule(llm, mod, r.code);
+
+      // SPEC-CONFORMANCE CHECK + immediate correction. The Verifier checks this
+      // module's summary against the spec (ports, behavior, and especially
+      // clock/reset style) AS IT IS BUILT — and any violation is sent straight
+      // back to the Builder to fix, instead of only being reported at the end.
+      for (let cround = 1; cround <= 2; cround++) {
+        if (fixBudget.ops <= 0) break;
+        const conf = await checkConformance(llm, spec, mod, summary);
+        if (!conf || conf.conforms) break; // conforms, or inconclusive
+        fixBudget.ops--;
+        if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
+        const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, conf.issues);
+        if (!fixed) break;
+        builtFiles[mod.name] = fixed;
+        r.code = fixed;
+        summary = await summarizeModule(llm, mod, fixed); // re-describe the corrected module
+      }
+      if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: true });
+
+      summaries.push(summary);
+
+      // Complexity (on the FINAL, conforming code): two independent estimates averaged.
+      //   codeScore — deterministic feature-vector formula
+      //   llmScore  — the LLM's own 1–100 from reading the full module
       const features = computeFeatures(r.code);
       const codeScore = baselineScore(features);
-      // Builder hands the Verifier a description of the module (NOT the code).
-      const summary = await summarizeModule(llm, mod, r.code);
-      summaries.push(summary);
       const llmScore = summary.complexity != null ? summary.complexity : codeScore;
-      // Average the two (one decimal). If the LLM estimate is missing, this is just codeScore.
       const finalScore = Math.round(((llmScore + codeScore) / 2) * 10) / 10;
       // Route to a verification tier: smoke (code-only floor) vs functional (oracle).
       const tier = routeTier(finalScore, features);
-      const entry = manifestByName[mod.name];
       if (entry) {
         entry.built = true;
         entry.complexity = finalScore;

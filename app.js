@@ -1796,6 +1796,13 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "conformance") {
+      if (ev.ok === false) {
+        consoleLog("⚠ " + ev.module + ": Verifier found a SPEC violation — sending back to the Builder to fix" +
+          (ev.issues ? " (" + String(ev.issues).split("\n")[0].slice(0, 120) + ")" : ""), "warn");
+      } else {
+        consoleLog("✓ " + ev.module + ": conforms to the spec", "ok");
+      }
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
     } else if (ev.type === "floor") {
