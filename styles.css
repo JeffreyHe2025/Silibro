@@ -108,7 +108,14 @@ body.chat-docked {
   --chat-w: 400px; /* live width of the docked LLM pane; JS updates it on drag */
   --console-h: 180px; /* live height of the docked console; JS updates it on drag */
   padding-right: var(--chat-w);
-  padding-bottom: var(--console-h);
+  /* No bottom padding on the body — that would shrink the sidebar too and leave a
+     gray gap under it. The console only sits over the workspace, so the bottom
+     clearance goes on the workspace instead (below), and the sidebar stays full-height. */
+}
+/* Reserve space at the bottom of the editor area so the docked console doesn't
+   cover it. The sidebar (left column) is unaffected and fills to the bottom. */
+body.chat-docked .workspace {
+  padding-bottom: calc(var(--console-h) + 20px);
 }
 body.chat-docked .console-panel {
   left: 250px; /* start after the sidebar so it doesn't cover Files */
