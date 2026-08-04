@@ -2861,6 +2861,20 @@
   function snapshotSentFiles() {
     files.forEach(function (f) { sentFullSnapshot[f.id] = f.code || ""; });
   }
+  // Parse an on-demand "NEED: a.v, b.v" request from the model's reply.
+  function parseNeedRequest(text) {
+    var m = (text || "").match(/^\s*NEED:\s*(.+)$/mi);
+    if (!m) return [];
+    return m[1].split(",").map(function (s) { return s.trim().replace(/[`'"]/g, ""); }).filter(Boolean);
+  }
+  // Build a user message that supplies the full bodies of the requested files.
+  function provideRequestedFiles(names) {
+    var parts = names.map(function (nm) {
+      var f = files.find(function (x) { return (x.name || "") === nm; });
+      return f ? ("--- " + f.name + " (full) ---\n" + (f.code || "")) : ("--- " + nm + " ---\n(no such file)");
+    });
+    return "Here are the full contents of the files you requested:\n\n" + parts.join("\n\n") + "\n\nNow continue with the task.";
+  }
 
   // Pull just the module header(s) (name + ports) out of Verilog, body omitted.
   function extractInterface(code) {
@@ -2911,7 +2925,7 @@
       });
       if (indexed) {
         lines.push("");
-        lines.push("NOTE: Files marked '(interface only)'/'(body omitted)' are UNCHANGED since you last saw them in full — only their interface is shown here to save space. If you need to edit one, output its full ```file:<name>``` block; if you need its full body first, say so and the user will re-share it.");
+        lines.push("NOTE: Files marked '(interface only)'/'(body omitted)' are UNCHANGED — only their interface is shown to save space. If you need the FULL body of one (or more) before you can proceed, reply with a SINGLE line exactly: 'NEED: <filename>[, <filename>...]' and nothing else; the full files will be provided and you can continue. To edit a file, output its full ```file:<name>``` block.");
       }
     }
     lines.push("");
@@ -3018,6 +3032,20 @@
       // The model now has the current file contents (full for changed, interface
       // for unchanged) — record them so the NEXT message only sends the delta.
       snapshotSentFiles();
+
+      // On-demand fetch: if the model asks 'NEED: <files>', supply their full
+      // bodies and let it continue. Capped to avoid loops.
+      var fetchRounds = 0;
+      var needed = parseNeedRequest(reply);
+      while (needed.length && fetchRounds < 2) {
+        fetchRounds++;
+        chatHistory.push({ role: "assistant", content: reply }); // the NEED request
+        chatHistory.push({ role: "user", content: provideRequestedFiles(needed) });
+        consoleLog("📎 sent full: " + needed.join(", ") + " (model requested)", "info");
+        bubble.textContent = "📎 fetching " + needed.join(", ") + "…";
+        reply = await callLLM(provider, key, model, system, chatHistory);
+        needed = parseNeedRequest(reply);
+      }
 
       var displayReply = stripFileBlocks(reply);
       bubble.textContent = displayReply;
