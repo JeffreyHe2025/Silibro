@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=6" />
+  <link rel="stylesheet" href="styles.css?v=7" />
 </head>
 <body>
   <header class="topbar">
@@ -91,7 +91,6 @@
             <div class="more-wrap">
               <button id="more-btn" class="btn">More ▾</button>
               <div id="more-menu" class="more-menu hidden">
-                <button id="testbench-btn" class="btn btn-tb" title="Generate Verilog testbenches with AI">Testbench</button>
                 <button id="tb-project" class="btn" title="Test the whole project: import a testbench or let the AI write one">Testbench project</button>
                 <button id="use-spec-btn" class="btn btn-spec hidden" title="Use this Markdown file as the design spec">Use as spec</button>
                 <button id="sync-btn" class="btn" title="Save and send all current project files to the AI">Sync current code</button>
@@ -260,17 +259,6 @@
   </div>
 
   <!-- ============ Testbench dialog ============ -->
-  <div id="tb-modal" class="modal-overlay hidden">
-    <div class="modal">
-      <h3>Write testbench</h3>
-      <button id="tb-file" class="btn">For this file</button>
-      <button id="tb-top" class="btn">For the top module</button>
-      <div class="modal-actions">
-        <button id="tb-cancel" class="btn btn-small">Cancel</button>
-      </div>
-    </div>
-  </div>
-
   <!-- ============ Testbench whole project dialog ============ -->
   <div id="tbproj-modal" class="modal-overlay hidden">
     <div class="modal">
@@ -328,7 +316,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=6"></script>
-  <script src="app.js?v=6"></script>
+  <script src="config.js?v=7"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>

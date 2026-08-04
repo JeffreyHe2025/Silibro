@@ -115,17 +115,12 @@
   var syncBtn = $("sync-btn");
   var moreBtn = $("more-btn");
   var moreMenu = $("more-menu");
-  var testbenchBtn = $("testbench-btn");
-  var tbModal = $("tb-modal");
-  var tbFileBtn = $("tb-file");
-  var tbTopBtn = $("tb-top");
   var tbProjectBtn = $("tb-project");
   var tbprojModal = $("tbproj-modal");
   var tbprojImportBtn = $("tbproj-import");
   var tbprojAiBtn = $("tbproj-ai");
   var tbprojCancelBtn = $("tbproj-cancel");
   var tbprojInput = $("tbproj-input");
-  var tbCancelBtn = $("tb-cancel");
   var clearBtn = $("clear-output");
   var outputPanel = $("output");
   var outputBody = $("output-body");
@@ -3066,81 +3061,7 @@
     if (found) e.preventDefault(); // don't also paste the image as raw text/data
   });
 
-  // -------------------------------------------------------------------------
-  // AI testbench generation (reuses the chat LLM + file-edit machinery)
-  // -------------------------------------------------------------------------
-  var TB_SYSTEM = [
-    "You are a Verilog verification engineer. Write clear, self-checking testbenches for the given Verilog module(s).",
-    "Rules:",
-    "- For each module under test, output a fenced block in EXACTLY this format, containing the FULL testbench file:",
-    "```file:tb_<module>.v",
-    "<testbench code>",
-    "```",
-    "- Name each testbench file 'tb_<module>.v'.",
-    "- Instantiate the module, drive stimulus, apply a clock and reset if the module has them, and check outputs, printing PASS/FAIL with $display. End with $finish.",
-    "- Output only the testbench file block(s) plus a one-line summary. Do NOT rewrite the module under test.",
-  ].join("\n");
-
   function isVerilogName(name) { return /\.(v|sv|svh|vh)$/i.test(name || ""); }
-
-  function openTbDialog() {
-    if (currentProjectId == null) { alert("Open a project first."); return; }
-    var cur = files.find(function (f) { return f.id === currentFileId; });
-    var curIsV = cur && isVerilogName(cur.name);
-    tbFileBtn.textContent = curIsV ? ("For this file (" + cur.name + ")") : "For this file (not a .v file)";
-    tbFileBtn.disabled = !curIsV;
-
-    var topId = resolveTop();
-    var topFile = topId && files.find(function (f) { return f.id === topId; });
-    var topIsV = topFile && isVerilogName(topFile.name);
-    tbTopBtn.textContent = topFile ? ("For the top module (" + topFile.name + ")") : "For the top module (none set)";
-    tbTopBtn.disabled = !topIsV;
-
-    tbModal.classList.remove("hidden");
-  }
-
-  async function writeTestbenchFor(cur) {
-    tbModal.classList.add("hidden");
-    if (!cur || !isVerilogName(cur.name)) { alert("That isn't a Verilog (.v) file."); return; }
-    var provider = currentProvider();
-    var key = getProviderKey(provider);
-    if (!key) { alert("Connect an LLM first — open the assistant (💬) and add an API key."); return; }
-    syncCurrentFileFromEditor(); // include unsaved edits if the target is open
-
-    var userMsg = "Write a testbench for this Verilog file.\n\n--- " +
-      cur.name + " ---\n" + (cur.code || "") + "\n\n";
-
-    clearOutput();
-    var model = getProviderModel(provider);
-    appendLine("Generating testbench for " + cur.name + " with " + model + " …", "info");
-    consoleLog("$ testbench " + cur.name, "cmd");
-    testbenchBtn.disabled = true;
-    try {
-      var reply = await callLLM(provider, key, model, TB_SYSTEM, [{ role: "user", content: userMsg }]);
-      var edits = parseFileEdits(reply);
-      if (!edits.length) {
-        appendLine("The model didn't return a testbench file — try again or pick another model.", "warn");
-        return;
-      }
-      var applied = await applyFileEdits(edits);
-      applied.forEach(function (n) { appendLine("created " + n, "ok"); });
-      appendLine("Done — " + applied.length + " testbench file(s) added to the project.", "ok");
-    } catch (err) {
-      appendLine("Error: " + (err.message || err), "error");
-    } finally {
-      testbenchBtn.disabled = false;
-    }
-  }
-
-  testbenchBtn.addEventListener("click", openTbDialog);
-  tbFileBtn.addEventListener("click", function () {
-    writeTestbenchFor(files.find(function (f) { return f.id === currentFileId; }));
-  });
-  tbTopBtn.addEventListener("click", function () {
-    var topId = resolveTop();
-    writeTestbenchFor(topId && files.find(function (f) { return f.id === topId; }));
-  });
-  tbCancelBtn.addEventListener("click", function () { tbModal.classList.add("hidden"); });
 
   // ---- Testbench the whole project (import your own, or the AI writes one) ----
   if (tbProjectBtn) tbProjectBtn.addEventListener("click", function () {
