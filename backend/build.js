@@ -731,4 +731,28 @@ async function buildDesign(llm, spec, onProgress) {
   return { results, cycle: cycle.map((m) => m.name), files: builtFiles, summaries, manifest };
 }
 
-module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore };
+// User-triggered WHOLE-PROJECT testbench: the Verifier writes one self-checking
+// testbench for the top-level module (the one nothing else instantiates), checking
+// the assembled design against the spec. Returns { name, code, top } or null.
+async function generateProjectTestbench(llm, spec, files) {
+  const design = files.map((f) => "// === FILE: " + f.name + " ===\n" + (f.code || "")).join("\n\n");
+  const sys =
+    "You are a verification engineer. Given a design specification and ALL the Verilog modules of a " +
+    "project, write ONE self-checking testbench that verifies the TOP-LEVEL module (the module that is " +
+    "not instantiated by any other) against the spec. Instantiate the top module by its exact name; " +
+    "generate a clock and reset if it is sequential; drive representative AND edge-case inputs; compute " +
+    "the EXPECTED outputs from the SPEC and check them. Print a line starting with 'PROJECT_FAIL' " +
+    "(with inputs, expected, actual) on any mismatch, and 'PROJECT_PASS' at the very end only if every " +
+    "check passed; then call $finish. Name the testbench module 'project_tb'. Output ONLY the testbench " +
+    "inside a ```verilog code block — no prose, and do NOT redefine the design modules.";
+  const user =
+    "Design specification:\n" +
+    (spec ? spec : "(no spec provided — infer the intended behavior from the modules)") +
+    "\n\nProject modules:\n\n" + design;
+  const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+  const code = extractVerilog(reply);
+  if (!code) return null;
+  return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
+}
+
+module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench };

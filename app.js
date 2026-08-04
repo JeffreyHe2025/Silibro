@@ -119,6 +119,12 @@
   var tbModal = $("tb-modal");
   var tbFileBtn = $("tb-file");
   var tbTopBtn = $("tb-top");
+  var tbProjectBtn = $("tb-project");
+  var tbprojModal = $("tbproj-modal");
+  var tbprojImportBtn = $("tbproj-import");
+  var tbprojAiBtn = $("tbproj-ai");
+  var tbprojCancelBtn = $("tbproj-cancel");
+  var tbprojInput = $("tbproj-input");
   var tbCancelBtn = $("tb-cancel");
   var clearBtn = $("clear-output");
   var outputPanel = $("output");
@@ -3135,6 +3141,90 @@
     writeTestbenchFor(topId && files.find(function (f) { return f.id === topId; }));
   });
   tbCancelBtn.addEventListener("click", function () { tbModal.classList.add("hidden"); });
+
+  // ---- Testbench the whole project (import your own, or the AI writes one) ----
+  if (tbProjectBtn) tbProjectBtn.addEventListener("click", function () {
+    moreMenu.classList.add("hidden");
+    if (currentProjectId == null) { alert("Open a project first."); return; }
+    tbprojModal.classList.remove("hidden");
+  });
+  if (tbprojCancelBtn) tbprojCancelBtn.addEventListener("click", function () {
+    tbprojModal.classList.add("hidden");
+  });
+  // Import an existing testbench file into the project.
+  if (tbprojImportBtn) tbprojImportBtn.addEventListener("click", function () {
+    tbprojInput.value = "";
+    tbprojInput.click();
+  });
+  if (tbprojInput) tbprojInput.addEventListener("change", async function () {
+    var f = tbprojInput.files && tbprojInput.files[0];
+    if (!f || currentProjectId == null) return;
+    tbprojModal.classList.add("hidden");
+    try {
+      var text = await f.text();
+      var name = uniqueFileName(f.name || "project_tb.v");
+      var res = await dbCreateFile(currentProjectId, name, text);
+      if (res.error) { alert("Could not save: " + res.error.message); return; }
+      files.push(res.data);
+      files.sort(function (a, b) { return (a.name || "").localeCompare(b.name || ""); });
+      renderFileList();
+      openFile(res.data.id);
+      consoleLog("⬆ imported project testbench: " + name, "ok");
+    } catch (e) { alert("Import failed: " + (e.message || e)); }
+  });
+  // Let the Verifier write a whole-project testbench and save it into Files.
+  if (tbprojAiBtn) tbprojAiBtn.addEventListener("click", async function () {
+    if (currentProjectId == null) { alert("Open a project first."); return; }
+    var base = getBackendUrl();
+    if (!base) { alert("Set a backend first (Console → ⚙ Backend)."); return; }
+    var provider = currentProvider();
+    var key = getProviderKey(provider);
+    if (!key) { alert("Connect an LLM first (add an API key in the LLM panel)."); return; }
+    syncCurrentFileFromEditor();
+    var vfiles = files.filter(function (f) { return isVerilogName(f.name); })
+      .map(function (f) { return { name: f.name, code: f.code || "" }; });
+    if (!vfiles.length) { alert("No Verilog files to test yet."); return; }
+    // Assemble the spec from any files marked as specs (or a spec.md).
+    var specFiles = getSpecIds()
+      .map(function (id) { return files.find(function (f) { return f.id === id; }); })
+      .filter(Boolean);
+    if (!specFiles.length) {
+      var sm = files.find(function (f) { return /^spec\.md$/i.test(f.name); });
+      if (sm) specFiles = [sm];
+    }
+    var specText = specFiles.map(function (s) { return s.code || ""; }).join("\n\n");
+
+    tbprojModal.classList.add("hidden");
+    tbprojAiBtn.disabled = true;
+    consoleLog("🤖 Verifier is writing a whole-project testbench…", "info");
+    try {
+      var resp = await fetch(base + "/testbench", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: vfiles, spec: specText, provider: provider, key: key, model: getProviderModel(provider) }),
+      });
+      var data = await resp.json();
+      if (data.error) { consoleLog("✗ testbench: " + data.error, "error"); return; }
+      // Save the generated testbench into Files.
+      var name = uniqueFileName(data.name || "project_tb.v");
+      var cres = await dbCreateFile(currentProjectId, name, data.code || "");
+      if (!cres.error) {
+        files.push(cres.data);
+        files.sort(function (a, b) { return (a.name || "").localeCompare(b.name || ""); });
+        renderFileList();
+        openFile(cres.data.id);
+        consoleLog("🧪 wrote " + name + " (whole-project testbench)", "ok");
+      }
+      // Report the run result.
+      if (data.passed === true) consoleLog("✓ project testbench: PASSED ✓", "ok");
+      else if (data.passed === false) consoleLog("✗ project testbench: FAILED ✗" + (data.output ? " — " + String(data.output).split(";")[0] : ""), "error");
+      else consoleLog("• project testbench: inconclusive (couldn't run) " + (data.output || ""), "warn");
+    } catch (e) {
+      consoleLog("✗ testbench: couldn't reach the backend — " + ((e && e.message) || e), "error");
+    } finally {
+      tbprojAiBtn.disabled = false;
+    }
+  });
 
   // Ask the LLM which file holds the top-level DESIGN module (not a testbench).
   async function detectTopWithAI() {

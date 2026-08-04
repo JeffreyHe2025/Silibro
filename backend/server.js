@@ -10,8 +10,8 @@
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
-const { buildDesign } = require("./build");
-const { compileVerilog, compileReport } = require("./compile");
+const { buildDesign, generateProjectTestbench } = require("./build");
+const { compileVerilog, compileReport, runTestbench } = require("./compile");
 const { startFlow, resumeFlow } = require("./flow");
 
 const app = express();
@@ -43,6 +43,32 @@ app.post("/compile/report", async (req, res) => {
   }
   try {
     res.json(await compileReport(files));
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Whole-project testbench: the Verifier writes a self-checking testbench for the
+// top module against the spec, then we run it. Returns { name, code, passed, output }.
+app.post("/testbench", async (req, res) => {
+  const { files, spec, provider, key, model } = req.body || {};
+  if (!Array.isArray(files) || !files.length || !provider || !key || !model) {
+    return res.status(400).json({ error: "files, provider, key, model are required" });
+  }
+  try {
+    const vfiles = files.filter((f) => f && /\.s?v$/i.test(f.name));
+    if (!vfiles.length) return res.json({ error: "no Verilog files in the project" });
+    const tb = await generateProjectTestbench({ provider, key, model }, spec || "", vfiles);
+    if (!tb || !tb.code) return res.json({ error: "could not generate a testbench" });
+    // Run it against the whole design.
+    const simFiles = vfiles.slice();
+    simFiles.push({ name: tb.name, code: tb.code });
+    const sim = await runTestbench(simFiles, tb.top);
+    const markers = ((sim.output.match(/PROJECT_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 300)).slice(0, 600);
+    const passed = /PROJECT_PASS/.test(sim.output) && !/PROJECT_FAIL/.test(sim.output)
+      ? true
+      : /PROJECT_FAIL/.test(sim.output) ? false : null;
+    res.json({ name: tb.name, code: tb.code, passed: passed, output: markers });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }
