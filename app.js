@@ -2854,6 +2854,34 @@
   }
 
   // Build the system context: the selected project's files + edit instructions.
+  // Track each file's content as of the last SUCCESSFUL send, so later messages
+  // send only the delta (unchanged files go as an interface-only index). Snapshot
+  // is committed after a send succeeds, so a failed send re-sends everything full.
+  var sentFullSnapshot = {};
+  function snapshotSentFiles() {
+    files.forEach(function (f) { sentFullSnapshot[f.id] = f.code || ""; });
+  }
+
+  // Pull just the module header(s) (name + ports) out of Verilog, body omitted.
+  function extractInterface(code) {
+    var out = [];
+    var re = /\bmodule\s+\w+[\s\S]*?\)\s*;/g;
+    var m;
+    while ((m = re.exec(code || ""))) out.push(m[0] + "\n  // ...body omitted (unchanged)...\nendmodule");
+    return out.length ? out.join("\n\n") : "// (interface unavailable)";
+  }
+
+  // Decide whether a file is sent in FULL this message, or just as an index.
+  // Full: specs, the open file, small files, and anything CHANGED since last full send.
+  function shouldSendFull(f) {
+    var code = f.code || "";
+    if (isSpec(f.id)) return true;                    // the design spec — source of truth
+    if (f.id === currentFileId) return true;          // the file the user is on
+    if (code.length < 400) return true;               // tiny — cheap to always send
+    if (sentFullSnapshot[f.id] !== code) return true; // changed since we last sent it full
+    return false;                                     // unchanged + large → index only
+  }
+
   function buildProjectContext() {
     syncCurrentFileFromEditor(); // include unsaved edits of the open file
     var lines = [
@@ -2865,11 +2893,26 @@
     if (!files.length) {
       lines.push("(no files yet)");
     } else {
+      var indexed = 0;
       files.forEach(function (f) {
+        var full = shouldSendFull(f);
         lines.push("");
-        lines.push("--- " + (f.name || "untitled.v") + " ---");
-        lines.push(f.code || "");
+        if (full) {
+          lines.push("--- " + (f.name || "untitled.v") + " ---");
+          lines.push(f.code || "");
+        } else if (isVerilogName(f.name)) {
+          lines.push("--- " + f.name + " (interface only — unchanged) ---");
+          lines.push(extractInterface(f.code));
+          indexed++;
+        } else {
+          lines.push("--- " + f.name + " (unchanged, " + (f.code || "").length + " chars, body omitted) ---");
+          indexed++;
+        }
       });
+      if (indexed) {
+        lines.push("");
+        lines.push("NOTE: Files marked '(interface only)'/'(body omitted)' are UNCHANGED since you last saw them in full — only their interface is shown here to save space. If you need to edit one, output its full ```file:<name>``` block; if you need its full body first, say so and the user will re-share it.");
+      }
     }
     lines.push("");
     lines.push("To CREATE or EDIT a file, output a fenced code block in EXACTLY this format, containing the FULL new contents of the file (never a diff or partial file):");
@@ -2972,6 +3015,9 @@
       if (!model) throw new Error("No model selected. Please pick a model from the dropdown above.");
       var system = buildProjectContext();
       var reply = await callLLM(provider, key, model, system, chatHistory);
+      // The model now has the current file contents (full for changed, interface
+      // for unchanged) — record them so the NEXT message only sends the delta.
+      snapshotSentFiles();
 
       var displayReply = stripFileBlocks(reply);
       bubble.textContent = displayReply;
