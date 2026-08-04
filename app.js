@@ -1944,6 +1944,10 @@
       if (data.review) doc += "\n\n---\n\n# Verifier review\n\n" + data.review;
       edits.push({ name: "module_summaries.md", content: doc });
     }
+    // Dependency graph (module list + Mermaid diagram) — viewable via 📊 Diagram.
+    if (data.dependencyGraph) {
+      edits.push({ name: "dependency_graph.md", content: data.dependencyGraph });
+    }
     Object.keys(filesObj).forEach(function (n) {
       edits.push({ name: /\.s?v$/i.test(n) ? n : n + ".v", content: filesObj[n] });
     });
@@ -1962,6 +1966,11 @@
         var msg3 = "🔎 Verifier review (from the module summaries, not the code):\n\n" + data.review;
         appendChatMsg("assistant", msg3);
         chatHistory.push({ role: "assistant", content: msg3 });
+      }
+      if (data.dependencyGraph) {
+        var msg5 = "📊 Created dependency_graph.md — open it and click the 📊 Diagram button to view the module dependency graph.";
+        appendChatMsg("assistant", msg5);
+        chatHistory.push({ role: "assistant", content: msg5 });
       }
     } else {
       if (lastFlowSpec) await applyFileEdits(edits); // still save the spec
@@ -2878,7 +2887,7 @@
     lines.push("DEPENDENCY GRAPH: When you decompose a design (from a prompt or a spec), ALSO create/maintain a file 'dependency_graph.md' that contains, in this order:");
     lines.push("1. FUNCTIONALITIES — each functional area of the design, and a bullet list of the Verilog modules that together make up that functionality.");
     lines.push("2. MODULES — each module, a one-line purpose, and the modules it depends on (directly instantiates); write 'depends on: none' for leaf modules.");
-    lines.push("3. A Mermaid diagram. Write the raw mermaid code starting with 'graph TD'. Do NOT wrap it in a ```mermaid block.");
+    lines.push("3. A Mermaid diagram in a fenced ```mermaid code block starting with 'graph TD', where an edge 'A --> B' means module A instantiates module B.");
     lines.push("Update dependency_graph.md whenever the module structure or dependencies change, using the same ```file:dependency_graph.md``` block format.");
     return lines.join("\n");
   }

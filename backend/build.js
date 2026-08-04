@@ -728,7 +728,43 @@ async function buildDesign(llm, spec, onProgress) {
     entry.complexityDeps = added; // not-yet-functionally-verified children that contributed
   }
 
-  return { results, cycle: cycle.map((m) => m.name), files: builtFiles, summaries, manifest };
+  return {
+    results,
+    cycle: cycle.map((m) => m.name),
+    files: builtFiles,
+    summaries,
+    manifest,
+    dependencyGraph: dependencyGraphMd(manifest),
+  };
+}
+
+// Build a Markdown dependency graph (module list + a Mermaid diagram) from the
+// manifest, so the frontend can render it with its Mermaid viewer. Edge "A --> B"
+// means module A instantiates (depends on) module B.
+function dependencyGraphMd(manifest) {
+  if (!manifest || !manifest.length) return "";
+  const lines = ["# Dependency Graph", "", "## Modules", ""];
+  manifest.forEach((m) => {
+    const deps = m.dependsOn || [];
+    const info = [];
+    if (m.complexity != null) info.push("complexity " + m.complexity + "/100");
+    if (m.verification) info.push(m.verification);
+    lines.push(
+      "- **" + m.name + "**" + (info.length ? " (" + info.join(", ") + ")" : "") +
+        (deps.length ? " → instantiates: " + deps.join(", ") : " — leaf")
+    );
+  });
+  lines.push("", "## Diagram", "", "```mermaid", "graph TD");
+  let edges = 0;
+  manifest.forEach((m) => {
+    (m.dependsOn || []).forEach((d) => {
+      lines.push("  " + m.name + " --> " + d);
+      edges++;
+    });
+  });
+  if (!edges) manifest.forEach((m) => lines.push("  " + m.name)); // lone nodes so it's not empty
+  lines.push("```");
+  return lines.join("\n");
 }
 
 // User-triggered WHOLE-PROJECT testbench: the Verifier writes one self-checking

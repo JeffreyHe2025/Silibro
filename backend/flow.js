@@ -49,6 +49,7 @@ async function getGraph() {
     log: Annotation(),
     summaries: Annotation(),
     manifest: Annotation(),
+    dependencyGraph: Annotation(),
     review: Annotation(),
   });
 
@@ -102,6 +103,7 @@ async function getGraph() {
       log: log,
       summaries: out.summaries || [],
       manifest: out.manifest || [],
+      dependencyGraph: out.dependencyGraph || "",
     };
   }
 
@@ -175,6 +177,7 @@ function summarize(result) {
     log: (result && result.log) || [],
     summaries: (result && result.summaries) || [],
     manifest: (result && result.manifest) || [], // dev-only reference on the client
+    dependencyGraph: (result && result.dependencyGraph) || "",
     review: (result && result.review) || "",
   };
 }
