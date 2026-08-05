@@ -3189,16 +3189,18 @@
       });
       var data = await resp.json();
       if (data.error) { consoleLog("✗ simulation: " + data.error, "error"); return; }
+      var out = String(data.output || "").trim();
       if (data.compileFailed) {
         consoleLog("✗ simulation: design + testbench won't compile (top: " + data.top + ")", "error");
       } else if (data.passed === true) {
         consoleLog("✓ simulation PASSED ✓ (top module: " + data.top + ")", "ok");
       } else if (data.passed === false) {
         consoleLog("✗ simulation FAILED ✗ (top module: " + data.top + ")", "error");
-      } else {
+      } else if (out) {
         consoleLog("• simulation ran (top module: " + data.top + ") — no clear PASS/FAIL marker; read the output below", "warn");
+      } else {
+        consoleLog("• simulation ran (top module: " + data.top + ") but produced NO output — the testbench printed nothing. Check that '" + data.top + "' is your real top-level testbench and that it $display's a result.", "warn");
       }
-      var out = String(data.output || "").trim();
       if (out) {
         consoleLog("── simulation output ──", "info");
         out.split("\n").forEach(function (ln) { consoleLog("   " + ln, "log"); });

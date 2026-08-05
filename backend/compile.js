@@ -212,29 +212,45 @@ function runTestbench(files, tbTop) {
 }
 
 // Find the top module to simulate for a (possibly multi-module) testbench file.
-// A testbench is the module that DRIVES the design: it has an initial block and a
-// $finish, or a tb-ish name, or is instantiated by no one. Returns a name or "".
+// The TOP is the module that no other module instantiates (the root) — NOT just
+// any module with $finish (a scoreboard/checker often has $finish too). Returns a
+// name or "". body[i] is everything between the module name and endmodule, so it
+// starts with the port list (or ';' when the module is portless — a classic
+// testbench-top trait).
 function findTopModule(code) {
   const src = String(code || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
   const mods = [];
-  const re = /\bmodule\s+(\w+)([\s\S]*?)\bendmodule\b/g;
+  const re = /\bmodule\s+(\w+)\b([\s\S]*?)\bendmodule\b/g;
   let m;
   while ((m = re.exec(src))) mods.push({ name: m[1], body: m[2] });
   if (!mods.length) return "";
-  const tb =
-    mods.find((x) => /\$finish/.test(x.body)) ||
-    mods.find((x) => /\binitial\b/.test(x.body)) ||
-    mods.find((x) => /(_tb|tb_|test|bench)/i.test(x.name));
-  if (tb) return tb.name;
-  // Fallback: the module that no other module instantiates (the root).
+  if (mods.length === 1) return mods[0].name;
+
+  // A module is INSTANTIATED if another module references it as an instance:
+  //   Name [#(...params...)] instName (   — the #(...) may contain nested parens.
+  const names = mods.map((x) => x.name);
   const instantiated = new Set();
-  mods.forEach((x) =>
-    mods.forEach((y) => {
-      if (x.name !== y.name && new RegExp("\\b" + y.name + "\\s+\\w+\\s*\\(").test(x.body)) instantiated.add(y.name);
-    })
-  );
-  const root = mods.find((x) => !instantiated.has(x.name));
-  return (root || mods[mods.length - 1]).name;
+  mods.forEach((host) => {
+    names.forEach((n) => {
+      if (n === host.name) return;
+      const rx = new RegExp("\\b" + n + "\\b\\s*(?:#\\s*\\([^)]*(?:\\([^)]*\\)[^)]*)*\\))?\\s*\\w+\\s*\\(");
+      if (rx.test(host.body)) instantiated.add(n);
+    });
+  });
+  const roots = mods.filter((x) => !instantiated.has(x.name));
+  const pool = roots.length ? roots : mods;
+
+  const portless = (x) => /^\s*;/.test(x.body) || /^\s*\(\s*\)\s*;/.test(x.body); // module tb;  / module tb();
+  const tbName = (x) => /^(tb|testbench|top)$/i.test(x.name) || /(_tb|tb_|test|bench)/i.test(x.name);
+  const hasClockGen = (x) => /always\s*#/.test(x.body) || /forever\s*#/.test(x.body); // generates its own clock
+
+  return (
+    pool.find((x) => portless(x) && tbName(x)) ||
+    pool.find((x) => portless(x)) ||          // a testbench top has no ports
+    pool.find((x) => hasClockGen(x)) ||        // it makes its own clock
+    pool.find((x) => tbName(x)) ||
+    pool[pool.length - 1]                      // last root as a final fallback
+  ).name;
 }
 
 module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, runTestbench, findTopModule };
