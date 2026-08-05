@@ -418,19 +418,119 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
   return null;
 }
 
-// Run one module's functional oracle test. Returns { passed:true|false|null, details }.
+// Attribute a testbench-stage COMPILE error to the testbench or the module.
+// iverilog reports errors as FILE:LINE; the module already compiled independently
+// (buildModule), so an error in the tb file — or ambiguous — is the testbench's
+// fault; an error in a module .v (and NOT the tb) is the module's. Returns
+// "testbench" | "module".
+function attributeCompile(output, tbName) {
+  const files = String(output || "").match(/[\w./-]+\.s?v/gi) || [];
+  const inTb = files.some((f) => f.endsWith(tbName));
+  const inMod = files.some((f) => !f.endsWith(tbName));
+  if (inMod && !inTb) return "module";
+  return "testbench"; // default: the module already compiled on its own
+}
+
+// Repair a functional oracle testbench that FAILED TO COMPILE. Feeds the iverilog
+// error + the previous testbench back to the LLM to fix the TESTBENCH ONLY (never
+// the module under test). Returns { code, top } or null.
+async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, compileError) {
+  const ports = (summary && summary.ports) || [];
+  const sys =
+    "You are a hardware verification engineer. The self-checking Verilog testbench you wrote for module '" +
+    mod.name + "' FAILED TO COMPILE. Fix ONLY the testbench so it compiles, keeping it a valid independent " +
+    "oracle: instantiate the module by its EXACT name and port names, generate a clock + reset if sequential, " +
+    "compute expected outputs from the spec, and print 'FUNC_FAIL' on a mismatch and 'FUNC_PASS' only if all " +
+    "checks pass, then $finish. Do NOT modify or redefine the module under test. Name the testbench 'tb_" +
+    mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no prose, no module under test.";
+  const user =
+    "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
+    "\n\nThe iverilog COMPILE ERROR from your testbench:\n" + String(compileError || "").slice(0, 800) +
+    "\n\nYour previous (non-compiling) testbench:\n```verilog\n" + prevCode + "\n```" +
+    "\n\nDesign specification (source of truth for expected outputs):\n" + spec;
+  const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+  const code = extractVerilog(reply);
+  if (!code) return null;
+  return { code: code, top: tbTopName(code, mod.name) };
+}
+
+// Run one module's functional oracle test. Returns
+// { passed:true|false|null, details, tbBroken? }.
+//   passed=true   -> FUNC_PASS (module conforms to the oracle)
+//   passed=false  -> FUNC_FAIL (module produced a wrong value) — a real module bug
+//   passed=null   -> inconclusive; tbBroken=true means the ORACLE itself couldn't
+//                    be made to compile (not the module's fault).
+// If the oracle testbench won't compile, we REPAIR the testbench (feed the compile
+// error back to the LLM) and retry — up to a few times — before giving up.
 async function funcTest(llm, spec, entry, builtFiles) {
-  const ftb = await genFunctionalTestbench(
-    llm, { name: entry.name, purpose: entry.purpose }, spec, entry.summary || {}
-  );
-  if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated" };
-  const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
-  simFiles.push({ name: "func_tb.v", code: ftb.code });
-  const sim = await runTestbench(simFiles, ftb.top);
-  const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
-  if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
-  if (/FUNC_FAIL/.test(sim.output)) return { passed: false, details: markers };
-  return { passed: null, details: markers };
+  const mod = { name: entry.name, purpose: entry.purpose };
+  let ftb = await genFunctionalTestbench(llm, mod, spec, entry.summary || {});
+  if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated", tbBroken: true };
+
+  const maxTbTries = 3;
+  for (let tbTry = 1; tbTry <= maxTbTries; tbTry++) {
+    const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+    simFiles.push({ name: "func_tb.v", code: ftb.code });
+    const sim = await runTestbench(simFiles, ftb.top);
+
+    if (sim.compileFailed) {
+      const where = attributeCompile(sim.output, "func_tb.v");
+      // The module already compiled independently, so a module-attributed error
+      // here is unexpected — report it as inconclusive (don't chase it as a bug).
+      if (where === "module") {
+        return { passed: null, details: "module compile error under test: " + sim.output.slice(0, 200), tbBroken: false };
+      }
+      // Broken oracle testbench: repair it and retry, unless out of tries.
+      if (tbTry < maxTbTries) {
+        const repaired = await repairFunctionalTestbench(llm, mod, spec, entry.summary || {}, ftb.code, sim.output);
+        if (!repaired || !repaired.code) {
+          return { passed: null, details: "testbench won't compile and repair failed: " + sim.output.slice(0, 160), tbBroken: true };
+        }
+        ftb = repaired;
+        continue;
+      }
+      return { passed: null, details: "oracle testbench won't compile after " + maxTbTries + " tries: " + sim.output.slice(0, 160), tbBroken: true };
+    }
+
+    const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
+    if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
+    if (/FUNC_FAIL/.test(sim.output)) return { passed: false, details: markers };
+    return { passed: null, details: markers }; // ran but printed no verdict
+  }
+  return { passed: null, details: "testbench could not be made to compile", tbBroken: true };
+}
+
+// Code-generated SMOKE test (no oracle): drive the module and confirm it RUNS
+// without producing undefined (X) outputs. Run as a BASELINE on every module — a
+// reliable, LLM-independent "does it run clean?" signal, so an oracle failure can
+// be attributed (module vs testbench). Returns { passed:true|false|null, markers }.
+//   passed=false -> the MODULE produced X / a real runtime problem
+//   passed=null  -> inconclusive: the smoke testbench itself couldn't compile (a
+//                   generator/interface issue), NOT the module's fault.
+async function runSmokeBaseline(code, floorFiles) {
+  try {
+    const iface = parseInterface(code);
+    if (!iface) return { passed: null, markers: "interface not parsed" };
+    const stb = genSmokeTestbench(iface);
+    const simFiles = floorFiles.slice();
+    simFiles.push({ name: "smoke_tb.v", code: stb.code });
+    const sim = await runTestbench(simFiles, stb.top);
+    if (sim.compileFailed) {
+      // A module-attributed error is a real fail; a smoke_tb error is our
+      // generator's problem → inconclusive (don't penalize the module).
+      const where = attributeCompile(sim.output, "smoke_tb.v");
+      return {
+        passed: where === "module" ? false : null,
+        markers: "smoke tb " + (where === "module" ? "module error: " : "couldn't compile: ") + sim.output.slice(0, 160),
+      };
+    }
+    const markers = (sim.output.match(/SMOKE_[A-Z]+[^\n]*/g) || []).join("; ").slice(0, 400);
+    if (/SMOKE_PASS/.test(sim.output)) return { passed: true, markers: markers };
+    if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) return { passed: false, markers: markers };
+    return { passed: null, markers: markers || (sim.ok ? "no verdict" : "sim error") };
+  } catch (e) {
+    return { passed: null, markers: String((e && e.message) || e) };
+  }
 }
 
 // Rebuild a module to fix a FUNCTIONAL bug, keeping its interface; compile-check
@@ -618,9 +718,9 @@ async function buildDesign(llm, spec, onProgress) {
       if (onProgress)
         onProgress({ type: "summary", module: mod.name, summary, complexity: finalScore });
 
-      // FLOOR-TIER TEST (code-only, no testbench, no oracle): structural lint.
-      // Only for smoke-tier modules. Functional-tier modules await the oracle
-      // testbench (not built yet), so they stay 'unverified' for now.
+      // STRUCTURAL + VERIFICATION on every built module: lint + generic synthesis,
+      // then a code-generated smoke baseline (runs clean?), then — for functional-
+      // tier modules — the LLM oracle testbench with fault localization & correction.
       //   verification: 'unverified' | 'smoke' | 'functional'
       //   Only 'functional' counts as trusted for pruning / fault isolation.
       if (entry) {
@@ -638,32 +738,24 @@ async function buildDesign(llm, spec, onProgress) {
         const synthOk = synth.available ? synth.synthesizable === true : true;
         const structuralOk = lint.clean && synthOk;
 
+        // SMOKE BASELINE on EVERY module (both tiers): a code-generated X-check
+        // confirming the module RUNS without producing undefined outputs. It's
+        // independent of the LLM oracle, so it gives a reliable "the module itself
+        // runs clean" signal used to attribute functional failures (module vs
+        // testbench). For smoke-tier modules it's also the verification gate.
+        const smoke = await runSmokeBaseline(r.code, floorFiles);
+        entry.smokeSimPassed = smoke.passed;
+        entry.smokeSimOutput = smoke.markers;
+        const smokeOk = smoke.passed !== false; // fail only on a real X/module failure
+
         if (tier === "smoke") {
-          // SMOKE TESTBENCH (code-generated, NO oracle): clock/reset + random
-          // stimulus + X-check. Catches undriven/uninitialized/incomplete outputs.
-          let smokePassed = null, smokeMarkers = "";
-          try {
-            const iface = parseInterface(r.code);
-            if (iface) {
-              const stb = genSmokeTestbench(iface);
-              const simFiles = floorFiles.slice();
-              simFiles.push({ name: "smoke_tb.v", code: stb.code });
-              const sim = await runTestbench(simFiles, stb.top);
-              smokeMarkers = (sim.output.match(/SMOKE_[A-Z]+[^\n]*/g) || []).join("; ").slice(0, 400);
-              if (/SMOKE_PASS/.test(sim.output)) smokePassed = true;
-              else if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) smokePassed = false;
-              else smokePassed = sim.ok ? null : false;
-            }
-          } catch (e) { smokeMarkers = String((e && e.message) || e); }
-          entry.smokeSimPassed = smokePassed;
-          entry.smokeSimOutput = smokeMarkers;
-          const smokeOk = smokePassed !== false;
           entry.verification = structuralOk && smokeOk ? "smoke" : "unverified";
         } else {
           // FUNCTIONAL ORACLE TESTBENCH + fault localization & correction.
           // Runs the oracle test; on failure it localizes the culprit (one bug at a
           // time, skipping verified children, suspicion-ordered) and rebuilds it,
-          // then re-tests. Only runs if the module is structurally sound.
+          // then re-tests. Only runs if the module is structurally sound. The smoke
+          // baseline above lets this path tell a broken testbench from a broken module.
           if (structuralOk) {
             try {
               await localizeAndFix(llm, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
@@ -791,4 +883,26 @@ async function generateProjectTestbench(llm, spec, files) {
   return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
 }
 
-module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench };
+// Repair a whole-project testbench that FAILED TO COMPILE — fix the TESTBENCH only,
+// feeding the iverilog error + previous testbench back. Returns { name, code, top }.
+async function repairProjectTestbench(llm, spec, files, prevCode, compileError) {
+  const design = files.map((f) => "// === FILE: " + f.name + " ===\n" + (f.code || "")).join("\n\n");
+  const sys =
+    "You are a verification engineer. The self-checking whole-project testbench you wrote FAILED TO " +
+    "COMPILE. Fix ONLY the testbench so it compiles: instantiate the top module by its exact name and " +
+    "port names, generate a clock + reset if sequential, compute expected outputs from the spec, print " +
+    "'PROJECT_FAIL' on a mismatch and 'PROJECT_PASS' only if all checks pass, then $finish. Do NOT " +
+    "redefine or modify the design modules. Name the testbench 'project_tb'. Output ONLY the corrected " +
+    "testbench inside a ```verilog code block — no prose.";
+  const user =
+    "The iverilog COMPILE ERROR from your testbench:\n" + String(compileError || "").slice(0, 800) +
+    "\n\nYour previous (non-compiling) testbench:\n```verilog\n" + prevCode + "\n```" +
+    "\n\nDesign specification:\n" + (spec || "(infer from modules)") +
+    "\n\nProject modules (do NOT redefine):\n\n" + design;
+  const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+  const code = extractVerilog(reply);
+  if (!code) return null;
+  return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
+}
+
+module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };

@@ -116,6 +116,7 @@
   var moreBtn = $("more-btn");
   var moreMenu = $("more-menu");
   var tbProjectBtn = $("tb-project");
+  var runSimBtn = $("run-sim");
   var tbprojModal = $("tbproj-modal");
   var tbprojImportBtn = $("tbproj-import");
   var tbprojAiBtn = $("tbproj-ai");
@@ -1834,13 +1835,26 @@
         consoleLog("   → floor tier " + (ev.verification === "smoke" ? "PASSED ✓" : "FAILED ✗"),
           ev.verification === "smoke" ? "ok" : "error");
       } else {
+        // Smoke baseline (code-generated) runs on functional modules too — a
+        // reliable "does the module run clean?" signal, independent of the oracle.
+        if (ev.smokeSimPassed === true) {
+          consoleLog("   • smoke baseline: runs clean ✓ (no undefined outputs)", "ok");
+        } else if (ev.smokeSimPassed === false) {
+          consoleLog("   • smoke baseline: module produces X ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
+        } else {
+          consoleLog("   • smoke baseline: inconclusive (testbench couldn't run)", "warn");
+        }
         // Functional oracle testbench (LLM-written, checks against the spec)
         if (ev.funcTbPassed === true) {
           consoleLog("   • functional testbench (oracle): PASSED ✓", "ok");
         } else if (ev.funcTbPassed === false) {
           consoleLog("   • functional testbench (oracle): FAILED ✗" + (ev.funcTbReason ? " — " + ev.funcTbReason : ""), "error");
         } else {
-          consoleLog("   • functional testbench (oracle): inconclusive (couldn't compile/run)", "warn");
+          // Distinguish a broken oracle (smoke ran clean) from a genuinely unclear result.
+          var oracleMsg = ev.smokeSimPassed === true
+            ? "inconclusive — oracle testbench couldn't compile (module runs clean, so the TEST was broken)"
+            : "inconclusive (couldn't compile/run)";
+          consoleLog("   • functional testbench (oracle): " + oracleMsg, "warn");
         }
         consoleLog("   → functional tier " + (ev.verification === "functional" ? "VERIFIED ✓" : "not verified ✗"),
           ev.verification === "functional" ? "ok" : "warn");
@@ -3151,6 +3165,49 @@
     moreMenu.classList.add("hidden");
     if (currentProjectId == null) { alert("Open a project first."); return; }
     tbprojModal.classList.remove("hidden");
+  });
+  // Run the CURRENTLY OPEN testbench against the whole project with the simulator
+  // (vvp) and show the real result — for imported / hand-written testbenches.
+  if (runSimBtn) runSimBtn.addEventListener("click", async function () {
+    if (moreMenu) moreMenu.classList.add("hidden");
+    if (currentProjectId == null) { alert("Open a project first."); return; }
+    var base = getBackendUrl();
+    if (!base) { alert("Set a backend first (Console → ⚙ Backend)."); return; }
+    syncCurrentFileFromEditor();
+    var tbFile = fileNameInput.value.trim();
+    if (!isVerilogName(tbFile)) { alert("Open your testbench (.v) file first, then Run simulation."); return; }
+    var vfiles = files.filter(function (f) { return isVerilogName(f.name); })
+      .map(function (f) { return { name: f.name, code: f.code || "" }; });
+    if (!vfiles.length) { alert("No Verilog files to simulate yet."); return; }
+    runSimBtn.disabled = true;
+    consoleLog("▶ simulating with testbench " + tbFile + " (vvp)…", "info");
+    try {
+      var resp = await fetch(base + "/testbench/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: vfiles, tbFile: tbFile }),
+      });
+      var data = await resp.json();
+      if (data.error) { consoleLog("✗ simulation: " + data.error, "error"); return; }
+      if (data.compileFailed) {
+        consoleLog("✗ simulation: design + testbench won't compile (top: " + data.top + ")", "error");
+      } else if (data.passed === true) {
+        consoleLog("✓ simulation PASSED ✓ (top module: " + data.top + ")", "ok");
+      } else if (data.passed === false) {
+        consoleLog("✗ simulation FAILED ✗ (top module: " + data.top + ")", "error");
+      } else {
+        consoleLog("• simulation ran (top module: " + data.top + ") — no clear PASS/FAIL marker; read the output below", "warn");
+      }
+      var out = String(data.output || "").trim();
+      if (out) {
+        consoleLog("── simulation output ──", "info");
+        out.split("\n").forEach(function (ln) { consoleLog("   " + ln, "log"); });
+      }
+    } catch (e) {
+      consoleLog("✗ simulation: couldn't reach the backend — " + ((e && e.message) || e), "error");
+    } finally {
+      runSimBtn.disabled = false;
+    }
   });
   if (tbprojCancelBtn) tbprojCancelBtn.addEventListener("click", function () {
     tbprojModal.classList.add("hidden");

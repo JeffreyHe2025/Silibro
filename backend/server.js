@@ -10,8 +10,8 @@
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
-const { buildDesign, generateProjectTestbench } = require("./build");
-const { compileVerilog, compileReport, runTestbench } = require("./compile");
+const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
+const { compileVerilog, compileReport, runTestbench, findTopModule } = require("./compile");
 const { startFlow, resumeFlow } = require("./flow");
 
 const app = express();
@@ -58,17 +58,74 @@ app.post("/testbench", async (req, res) => {
   try {
     const vfiles = files.filter((f) => f && /\.s?v$/i.test(f.name));
     if (!vfiles.length) return res.json({ error: "no Verilog files in the project" });
-    const tb = await generateProjectTestbench({ provider, key, model }, spec || "", vfiles);
+    let tb = await generateProjectTestbench({ provider, key, model }, spec || "", vfiles);
     if (!tb || !tb.code) return res.json({ error: "could not generate a testbench" });
-    // Run it against the whole design.
-    const simFiles = vfiles.slice();
-    simFiles.push({ name: tb.name, code: tb.code });
-    const sim = await runTestbench(simFiles, tb.top);
+
+    // Run it against the whole design. If the TESTBENCH won't compile, repair the
+    // testbench (feed the iverilog error back) and retry — up to a few times —
+    // before reporting. The design modules aren't touched.
+    const maxTbTries = 3;
+    let sim = null;
+    for (let tbTry = 1; tbTry <= maxTbTries; tbTry++) {
+      const simFiles = vfiles.slice();
+      simFiles.push({ name: tb.name, code: tb.code });
+      sim = await runTestbench(simFiles, tb.top);
+      if (!sim.compileFailed) break;
+      if (tbTry < maxTbTries) {
+        const repaired = await repairProjectTestbench({ provider, key, model }, spec || "", vfiles, tb.code, sim.output);
+        if (repaired && repaired.code) { tb = repaired; continue; }
+      }
+      break; // couldn't repair, or out of tries — report the compile error below
+    }
+    if (sim && sim.compileFailed) {
+      return res.json({ name: tb.name, code: tb.code, passed: null, output: "testbench won't compile: " + sim.output.slice(0, 400) });
+    }
     const markers = ((sim.output.match(/PROJECT_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 300)).slice(0, 600);
     const passed = /PROJECT_PASS/.test(sim.output) && !/PROJECT_FAIL/.test(sim.output)
       ? true
       : /PROJECT_FAIL/.test(sim.output) ? false : null;
     res.json({ name: tb.name, code: tb.code, passed: passed, output: markers });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Run an EXISTING (e.g. imported) testbench against the design with the simulator.
+// Compiles the project + testbench and runs vvp, returning the RAW simulation
+// output plus a best-effort pass/fail read from common markers. Unlike /testbench,
+// this does NOT generate a testbench — it runs the one already in the files.
+//   body: { files:[{name,code}], tbFile?, tbTop? }
+//   -> { top, passed:true|false|null, compileFailed, output }
+app.post("/testbench/run", async (req, res) => {
+  const { files, tbFile, tbTop } = req.body || {};
+  if (!Array.isArray(files) || !files.length) {
+    return res.status(400).json({ error: "files: [{name, code}] required" });
+  }
+  try {
+    const vfiles = files.filter((f) => f && /\.s?v$/i.test(f.name));
+    if (!vfiles.length) return res.json({ error: "no Verilog files provided" });
+
+    // Pick the testbench top: caller-given, else detect from the named tb file,
+    // else detect across all files.
+    let top = tbTop;
+    if (!top && tbFile) {
+      const tf = vfiles.find((f) => f.name === tbFile);
+      if (tf) top = findTopModule(tf.code);
+    }
+    if (!top) top = findTopModule(vfiles.map((f) => f.code || "").join("\n"));
+    if (!top) return res.json({ error: "could not determine the testbench's top module" });
+
+    const sim = await runTestbench(vfiles, top);
+    if (sim.compileFailed) {
+      return res.json({ top, passed: null, compileFailed: true, output: (sim.output || "").slice(0, 4000) });
+    }
+    // Best-effort verdict from common markers (user testbenches vary); FAIL wins
+    // over PASS. When nothing clear is printed, leave it null and show raw output.
+    const out = sim.output || "";
+    let passed = null;
+    if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out)) passed = false;
+    else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out)) passed = true;
+    res.json({ top, passed, compileFailed: false, output: out.slice(0, 4000) });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }

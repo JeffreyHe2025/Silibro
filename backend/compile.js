@@ -192,20 +192,49 @@ function runTestbench(files, tbTop) {
       execFile("iverilog", args, { timeout: 20000 }, (cerr, cstdout, cstderr) => {
         if (cerr) {
           try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
-          resolve({ ok: false, output: "compile error: " + (cstderr || cstdout || String(cerr)).trim() });
+          // compileFailed distinguishes "the testbench/interface won't build" from
+          // "it ran and reported a result" — the caller uses this to tell a broken
+          // testbench apart from a real module failure.
+          resolve({ ok: false, compileFailed: true, output: "compile error: " + (cstderr || cstdout || String(cerr)).trim() });
           return;
         }
         execFile("vvp", [out], { timeout: 20000 }, (rerr, rstdout, rstderr) => {
           try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
           const simOut = ((rstdout || "") + (rstderr || "")).trim();
-          resolve({ ok: !rerr || simOut.length > 0, output: simOut });
+          resolve({ ok: !rerr || simOut.length > 0, compileFailed: false, output: simOut });
         });
       });
     } catch (e) {
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
-      resolve({ ok: false, output: String((e && e.message) || e) });
+      resolve({ ok: false, compileFailed: true, output: String((e && e.message) || e) });
     }
   });
 }
 
-module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, runTestbench };
+// Find the top module to simulate for a (possibly multi-module) testbench file.
+// A testbench is the module that DRIVES the design: it has an initial block and a
+// $finish, or a tb-ish name, or is instantiated by no one. Returns a name or "".
+function findTopModule(code) {
+  const src = String(code || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const mods = [];
+  const re = /\bmodule\s+(\w+)([\s\S]*?)\bendmodule\b/g;
+  let m;
+  while ((m = re.exec(src))) mods.push({ name: m[1], body: m[2] });
+  if (!mods.length) return "";
+  const tb =
+    mods.find((x) => /\$finish/.test(x.body)) ||
+    mods.find((x) => /\binitial\b/.test(x.body)) ||
+    mods.find((x) => /(_tb|tb_|test|bench)/i.test(x.name));
+  if (tb) return tb.name;
+  // Fallback: the module that no other module instantiates (the root).
+  const instantiated = new Set();
+  mods.forEach((x) =>
+    mods.forEach((y) => {
+      if (x.name !== y.name && new RegExp("\\b" + y.name + "\\s+\\w+\\s*\\(").test(x.body)) instantiated.add(y.name);
+    })
+  );
+  const root = mods.find((x) => !instantiated.has(x.name));
+  return (root || mods[mods.length - 1]).name;
+}
+
+module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, runTestbench, findTopModule };
