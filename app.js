@@ -3274,9 +3274,13 @@
         "  |  wires: " + (s.wires != null ? s.wires : "?"), "log");
       if (data.longestPath != null)
         consoleLog("   • longest combinational path: " + data.longestPath + " logic levels (rough depth — lower means a faster clock)", "log");
-      if (s.gateEquivalents != null)
-        consoleLog("   • area ≈ " + s.gateEquivalents.toLocaleString() + " gate-equivalents (NAND2-normalized estimate — tech-independent, not µm²)", "log");
-      if (s.area != null) consoleLog("   • chip area: " + s.area + " (from standard-cell library)", "log");
+      if (s.area != null) {
+        consoleLog("   • chip area: " + s.area + " µm²" + (data.technology ? " (" + data.technology + ")" : ""), "ok");
+        if (s.gateEquivalents != null)
+          consoleLog("     (≈ " + s.gateEquivalents.toLocaleString() + " gate-equivalents)", "log");
+      } else if (s.gateEquivalents != null) {
+        consoleLog("   • area ≈ " + s.gateEquivalents.toLocaleString() + " gate-equivalents (estimate — no cell library on the backend; add one for real µm²)", "log");
+      }
       if (s.memoryBits) consoleLog("   • inferred memory: " + s.memoryBits + " bits", "log");
       if (s.cellTypes && s.cellTypes.length) {
         var top5 = s.cellTypes.slice().sort(function (a, b) { return b.count - a.count; }).slice(0, 6);

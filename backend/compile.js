@@ -337,17 +337,21 @@ function parseYosysStat(log) {
   // The indented breakdown rows belong to whichever totals row came last: the
   // "cells" row is followed by cell types, the "submodules" row by instance
   // counts. Without tracking that, submodules get counted as gates.
+  // With -liberty, `stat` inserts an AREA column, so rows gain a middle number:
+  //   no lib:  "   47 cells"       "    9   $_DFF_PN0_"
+  //   -liberty:"    5       14 cells"   "    1        6   DFFX1"   (area may be '-')
+  // Both regexes treat that middle area column as optional.
   let section = "";
   block.split("\n").forEach((line) => {
-    // Totals row: "       47 cells"  ('-' means zero)
-    let m = line.match(/^\s*(\d+|-)\s+([a-z ]+?)\s*$/);
+    // Totals row: <count> [<area>] <label>   (label starts with a letter)
+    let m = line.match(/^\s*(\d+|-)\s+(?:[\d.]+|-)?\s*([a-z][a-z ]*?)\s*$/);
     if (m && LABELS[m[2]]) {
       stats[LABELS[m[2]]] = m[1] === "-" ? 0 : parseInt(m[1], 10);
       section = m[2] === "cells" ? "cells" : m[2] === "submodules" ? "submodules" : "";
       return;
     }
-    // Breakdown row: "        9   $_DFF_PN0_"  (two+ spaces before the name)
-    m = line.match(/^\s*(\d+)\s{2,}([\w$\\.]+)\s*$/);
+    // Breakdown row: <count> [<area>] <cellName>   (name has $/_/digits)
+    m = line.match(/^\s*(\d+)\s+(?:(?:[\d.]+|-)\s+)?([\w$\\.]+)\s*$/);
     if (m) {
       const row = { name: m[2], count: parseInt(m[1], 10) };
       if (section === "submodules") stats.submoduleUses.push(row);
@@ -473,14 +477,35 @@ function synthesizeProject(files, opts) {
         .map((f) => ({ file: f.name, reason: nonSynthConstructs(f.code) }))
         .filter((x) => x.reason);
 
+      // COMBINATION FLOW: if a standard-cell library is bundled on the backend
+      // (backend/lib/gscl45nm.lib), map the synth'd netlist onto it — dfflibmap
+      // (flip-flops) + abc (logic) — and `stat -liberty` then reports a REAL µm²
+      // chip area. Our thorough `synth` keeps the optimization; the library adds
+      // real area. The lib is a FIXED server-side file (no injection); we copy it
+      // into the temp dir under a safe local name. Absent → generic gates + the GE
+      // estimate, exactly as before.
+      let libName = "";
+      try {
+        const libSrc = path.join(__dirname, "lib", "gscl45nm.lib");
+        if (fs.existsSync(libSrc)) {
+          libName = "cells.lib";
+          fs.copyFileSync(libSrc, path.join(dir, libName));
+        }
+      } catch (_) { libName = ""; }
+      const mapSteps = libName
+        ? ['dfflibmap -liberty "' + libName + '"', 'abc -liberty "' + libName + '"', "opt_clean"]
+        : [];
+      const statCmd = libName ? "stat -top " + top + ' -liberty "' + libName + '"' : "stat -top " + top;
+
       const script = [
         "read_verilog -sv " + names.map((n) => '"' + n + '"').join(" "),
         "hierarchy -check -top " + top,
-        "synth -top " + top,                       // the full generic flow
+        "synth -top " + top,                       // the full generic flow (optimization)
+        "check -assert",                           // validate the DESIGN (undriven/multi-driver/loops) BEFORE mapping
+        ...mapSteps,                               // map onto the real cell library (if bundled) — for area
         "write_verilog -noattr netlist.v",         // gate-level netlist
         "write_json netlist.json",                 // machine-readable (nextpnr etc.)
-        "stat -top " + top,
-        "check -assert",                           // undriven / multi-driver / loops
+        statCmd,                                    // stats — real µm² area when -liberty
         "flatten",                                 // depth across the hierarchy...
         "opt_clean",
         "ltp -noff",                               // ...combinational path length
@@ -521,6 +546,7 @@ function synthesizeProject(files, opts) {
             top: top,
             roots: detected.roots,
             excluded: excluded,
+            technology: libName ? "gscl45nm (45nm standard cells)" : "generic gates",
             stats: parseYosysStat(log),
             longestPath: ltp ? parseInt(ltp[1], 10) : null,
             netlist: netlist,
