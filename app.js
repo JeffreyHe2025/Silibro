@@ -105,7 +105,6 @@
   var exportFileBtn = $("export-file");
   var exportProjectBtn = $("export-project");
   var exportCancelBtn = $("export-cancel");
-  var runBtn = $("run-editor");
   var viewDiagramBtn = $("view-diagram");
   var editorEl = $("editor");
   var diagramView = $("diagram-view");
@@ -1405,9 +1404,11 @@
     }
   }
 
-  runBtn.addEventListener("click", runCode);
   clearBtn.addEventListener("click", clearOutput);
-  if (viewDiagramBtn) viewDiagramBtn.addEventListener("click", showDiagram);
+  if (viewDiagramBtn) viewDiagramBtn.addEventListener("click", function () {
+    if (moreMenu) moreMenu.classList.add("hidden"); // it now lives in the More menu
+    showDiagram();
+  });
   if (diagramClose) diagramClose.addEventListener("click", hideDiagram);
 
   // Resizable docked LLM Connection pane — drag its left edge (min/max clamped).
