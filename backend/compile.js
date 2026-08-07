@@ -364,7 +364,31 @@ function parseYosysStat(log) {
   stats.flipFlops = stats.cellTypes
     .filter((c) => /^\$_(S?DFFE?|DFFSR|ADFF|ALDFF|DLATCH|SR)/i.test(c.name) || /\b(dff|dlatch|sdff)/i.test(c.name))
     .reduce((n, c) => n + c.count, 0);
+
+  // Gate-Equivalent (GE) area — a TECHNOLOGY-INDEPENDENT area estimate: each cell
+  // weighted by its size relative to a 2-input NAND (= 1 GE), then summed. Generic
+  // synthesis has no physical µm² (that needs a standard-cell library), so this is
+  // the portable proxy people quote as "kGE". It's an estimate, not real area.
+  stats.gateEquivalents = Math.round(
+    stats.cellTypes.reduce((sum, c) => sum + c.count * geWeight(c.name), 0)
+  );
   return stats;
+}
+
+// NAND2-equivalent (GE) weight for a generic yosys gate or a std-cell name.
+// Rough, widely-used approximations — order matters (check sequential/XOR/mux
+// before the generic and/or fallback, since names overlap: XNOR contains "nor").
+function geWeight(name) {
+  if (/latch/i.test(name)) return 3;
+  if (/dff|dffe|sdff|adff|aldff|dffsr|\bsr\b/i.test(name)) return 5.5; // flip-flops
+  if (/xnor|xor/i.test(name)) return 3;
+  if (/mux/i.test(name)) return 2.5;
+  if (/aoi4|oai4/i.test(name)) return 2;
+  if (/aoi|oai/i.test(name)) return 1.5;
+  if (/\bnot\b|inv|\$_not_/i.test(name)) return 0.5;
+  if (/buf/i.test(name)) return 1;
+  if (/and|nand|\bor\b|nor|ornot|andnot/i.test(name)) return 1;
+  return 1; // unknown cell → 1 GE
 }
 
 // FINAL WHOLE-PROJECT SYNTHESIS. Unlike synthCheck (a light per-module "can this
