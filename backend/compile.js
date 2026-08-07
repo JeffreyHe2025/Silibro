@@ -282,6 +282,37 @@ function findTopDesignModule(files) {
   return { top: roots.length === 1 ? roots[0] : "", roots, designFiles, excluded };
 }
 
+// Which of `names` are instantiated inside `body`:  Name [#(...)] instName (
+// (the #(...) param override may contain nested parens).
+function instancesIn(body, names) {
+  const found = [];
+  names.forEach((n) => {
+    const rx = new RegExp("\\b" + n + "\\b\\s*(?:#\\s*\\([^)]*(?:\\([^)]*\\)[^)]*)*\\))?\\s*\\w+\\s*\\(");
+    if (rx.test(body)) found.push(n);
+  });
+  return found;
+}
+
+// Transitive closure of modules reachable from `top` via instantiation — the
+// design's actual hierarchy. Anything NOT in this set (testbench components,
+// unused modules) is irrelevant to synthesizing `top`, no matter how it's split
+// across files or what it's named. `mods` is [{name, body}] for the whole project.
+function reachableFrom(top, mods) {
+  const byName = {};
+  mods.forEach((m) => { if (!(m.name in byName)) byName[m.name] = m; });
+  const allNames = mods.map((m) => m.name);
+  const seen = new Set();
+  const stack = [top];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    const m = byName[cur];
+    if (m) instancesIn(m.body, allNames).forEach((n) => { if (!seen.has(n)) stack.push(n); });
+  }
+  return seen; // reachable module names, including `top`
+}
+
 // Parse a `stat` block out of the yosys log into numbers. Yosys prints either a
 // "=== design hierarchy ===" summary (multi-module, counts INCLUDING submodules)
 // or a single "=== <module> ===" block. Both use the same "<count> <label>" rows,
@@ -382,14 +413,29 @@ function synthesizeProject(files, opts) {
       return;
     }
 
+    // Reachability-based inclusion: keep only files that hold a module the top
+    // actually instantiates (transitively). This follows the design hierarchy, so
+    // it drops testbench components even when they're split across separate files
+    // (UVM-style) or oddly named — not a testbench-naming guess. The per-file
+    // testbench heuristic above is now only used to auto-DETECT the top.
+    const allMods = [];
+    vfiles.forEach((f) => parseModules(f.code).forEach((m) => allMods.push(m)));
+    if (!allMods.some((m) => m.name === top)) {
+      resolve({ ok: false, top: top, errors: ["top module '" + top + "' was not found in the project files"], output: "" });
+      return;
+    }
+    const reach = reachableFrom(top, allMods);
+    const designFiles = vfiles.filter((f) => parseModules(f.code).some((m) => reach.has(m.name)));
+    const excluded = vfiles.filter((f) => designFiles.indexOf(f) < 0).map((f) => f.name);
+
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsynthproj-"));
     try {
-      // Only the design files go in — a testbench would drag $display/#delay into
-      // synthesis and fail (or be silently stripped, which is worse). Write them
-      // under safe generated names (src0.v, src1.v, …) so a crafted filename can't
-      // path-traverse or inject into the script — module names inside the files
-      // are what synthesis uses, not the filenames.
-      const names = detected.designFiles.map((f, i) => {
+      // Only the reachable design files go in — a testbench would drag
+      // $display/#delay into synthesis and fail (or be silently stripped, which is
+      // worse). Write them under safe generated names (src0.v, src1.v, …) so a
+      // crafted filename can't path-traverse or inject into the script — module
+      // names inside the files are what synthesis uses, not the filenames.
+      const names = designFiles.map((f, i) => {
         const safe = "src" + i + ".v";
         fs.writeFileSync(path.join(dir, safe), f.code || "");
         return safe;
@@ -399,7 +445,7 @@ function synthesizeProject(files, opts) {
       // erroring, so a design containing them would synthesize "clean" into
       // hardware that doesn't match simulation. Scan for them separately — same
       // check the per-module synthCheck does, applied to the whole design.
-      const simOnly = detected.designFiles
+      const simOnly = designFiles
         .map((f) => ({ file: f.name, reason: nonSynthConstructs(f.code) }))
         .filter((x) => x.reason);
 
@@ -450,7 +496,7 @@ function synthesizeProject(files, opts) {
             available: true,
             top: top,
             roots: detected.roots,
-            excluded: detected.excluded,
+            excluded: excluded,
             stats: parseYosysStat(log),
             longestPath: ltp ? parseInt(ltp[1], 10) : null,
             netlist: netlist,
