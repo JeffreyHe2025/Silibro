@@ -96,7 +96,10 @@ async function getGraph() {
     const out = await buildDesign(
       { provider: state.provider, key: state.key, model: state.builderModel },
       state.spec,
-      function (ev) { log.push(ev); if (emit) emit(ev); }
+      function (ev) { log.push(ev); if (emit) emit(ev); },
+      // The VERIFIER model writes the functional oracle testbench + conformance
+      // review — independent of the Builder that wrote the code.
+      { provider: state.provider, key: state.key, model: state.verifierModel }
     );
     return {
       files: out.files || {},

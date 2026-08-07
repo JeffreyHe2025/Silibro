@@ -327,11 +327,13 @@ function tbTopName(code, dutName) {
   return names.find((n) => n !== dutName) || "tb_" + dutName;
 }
 
-// FUNCTIONAL ORACLE TESTBENCH (higher tiers). The LLM writes a self-checking
-// testbench from the module's CONTRACT (spec + interface + intended function) —
-// NOT its implementation — so the oracle is independent of the code. It drives
-// representative + edge inputs, computes expected outputs FROM THE SPEC, and
-// checks them, printing FUNC_PASS / FUNC_FAIL. Returns { code, top } or null.
+// FUNCTIONAL ORACLE TESTBENCH (higher tiers). The VERIFIER LLM (not the Builder)
+// writes a self-checking testbench from the module's CONTRACT (spec + interface) —
+// NOT its implementation — so the oracle is independent of the code AND of the
+// model that wrote the code. Expected values come from the SPEC (authoritative);
+// the summary is used only for the interface (ports/params/clock-reset). It drives
+// representative + edge inputs and prints FUNC_PASS / FUNC_FAIL. Returns
+// { code, top } or null.
 async function genFunctionalTestbench(llm, mod, spec, summary) {
   const ports = (summary && summary.ports) || [];
   const params = (summary && summary.parameters) || [];
@@ -344,7 +346,8 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
     "(1) instantiate the module by its exact name and port names; " +
     "(2) generate a clock and apply the reset sequence if the module is sequential; " +
     "(3) drive a range of representative inputs AND edge cases; " +
-    "(4) for each, compute the EXPECTED output from the specification and compare it to the actual output; " +
+    "(4) for each, compute the EXPECTED output FROM THE SPECIFICATION (the spec is authoritative — the " +
+    "'intended function' summary is only a hint for the interface, do NOT trust it over the spec) and compare it to the actual output; " +
     "(5) on a mismatch, print a line starting with 'FUNC_FAIL' including inputs, expected, and actual; " +
     "(6) at the very end, print 'FUNC_PASS' only if every check passed; (7) call $finish. " +
     "Name the testbench module 'tb_" + mod.name + "'. Output ONLY the testbench inside a ```verilog code block — " +
@@ -462,9 +465,11 @@ async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, comp
 //                    be made to compile (not the module's fault).
 // If the oracle testbench won't compile, we REPAIR the testbench (feed the compile
 // error back to the LLM) and retry — up to a few times — before giving up.
-async function funcTest(llm, spec, entry, builtFiles) {
+// vllm = the VERIFIER LLM: it writes (and repairs) the oracle from the spec +
+// interface summary — NOT the code — so the test is independent of the Builder.
+async function funcTest(vllm, spec, entry, builtFiles) {
   const mod = { name: entry.name, purpose: entry.purpose };
-  let ftb = await genFunctionalTestbench(llm, mod, spec, entry.summary || {});
+  let ftb = await genFunctionalTestbench(vllm, mod, spec, entry.summary || {});
   if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated", tbBroken: true };
 
   const maxTbTries = 3;
@@ -482,7 +487,7 @@ async function funcTest(llm, spec, entry, builtFiles) {
       }
       // Broken oracle testbench: repair it and retry, unless out of tries.
       if (tbTry < maxTbTries) {
-        const repaired = await repairFunctionalTestbench(llm, mod, spec, entry.summary || {}, ftb.code, sim.output);
+        const repaired = await repairFunctionalTestbench(vllm, mod, spec, entry.summary || {}, ftb.code, sim.output);
         if (!repaired || !repaired.code) {
           return { passed: null, details: "testbench won't compile and repair failed: " + sim.output.slice(0, 160), tbBroken: true };
         }
@@ -588,14 +593,17 @@ function suspectChildren(entry, modByName) {
 // this module's own logic → rebuild it. Re-test after each fix. `budget.ops` caps
 // total test/fix operations across the whole build to control cost.
 // Returns true if `entry` ends up functionally verified.
-async function localizeAndFix(llm, spec, entry, builtFiles, modByName, onProgress, budget, depth) {
+// llm = BUILDER (rebuilds broken code). vllm = VERIFIER (writes/runs the oracle
+// via funcTest) — kept separate so the test that judges the code is written by a
+// different model than the one that wrote (and fixes) the code.
+async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onProgress, budget, depth) {
   depth = depth || 0;
   const emit = (o) => { if (onProgress) onProgress(Object.assign({ type: "drill", depth: depth }, o)); };
   const maxRounds = 3;
   for (let round = 1; round <= maxRounds; round++) {
     if (budget.ops <= 0) { emit({ module: entry.name, msg: "correction budget exhausted" }); break; }
     budget.ops--;
-    const res = await funcTest(llm, spec, entry, builtFiles);
+    const res = await funcTest(vllm, spec, entry, builtFiles); // Verifier's oracle
     entry.funcTbPassed = res.passed;
     entry.funcTbOutput = res.details;
     if (res.passed === true) {
@@ -613,7 +621,7 @@ async function localizeAndFix(llm, spec, entry, builtFiles, modByName, onProgres
       if (budget.ops <= 0) break;
       budget.ops--;
       emit({ module: child.name, msg: "testing child of " + entry.name });
-      const cres = await funcTest(llm, spec, child, builtFiles);
+      const cres = await funcTest(vllm, spec, child, builtFiles); // Verifier's oracle
       child.funcTbPassed = cres.passed; child.funcTbOutput = cres.details;
       if (cres.passed === true) {
         child.verification = "functional"; child.testbenched = true;
@@ -626,7 +634,7 @@ async function localizeAndFix(llm, spec, entry, builtFiles, modByName, onProgres
     }
     if (culprit) {
       emit({ module: culprit.name, msg: "localized culprit — correcting it" });
-      await localizeAndFix(llm, spec, culprit, builtFiles, modByName, onProgress, budget, depth + 1);
+      await localizeAndFix(llm, vllm, spec, culprit, builtFiles, modByName, onProgress, budget, depth + 1);
       // loop: re-test `entry` now that the child is (hopefully) fixed
     } else {
       emit({ module: entry.name, msg: "bug is in own logic — rebuilding" });
@@ -640,7 +648,12 @@ async function localizeAndFix(llm, spec, entry, builtFiles, modByName, onProgres
 }
 
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
-async function buildDesign(llm, spec, onProgress) {
+// llm = the BUILDER (writes/fixes code). verifierLLM = the VERIFIER (writes the
+// functional oracle testbench + reviews spec conformance) — a DIFFERENT model, so
+// the oracle is independent of the code it checks. Falls back to the builder LLM
+// when no verifier is given (e.g. the single-model /build endpoint).
+async function buildDesign(llm, spec, onProgress, verifierLLM) {
+  verifierLLM = verifierLLM || llm;
   const modules = await planGraph(llm, spec);
   const { order, cycle } = topoSort(modules);
   if (onProgress)
@@ -681,7 +694,7 @@ async function buildDesign(llm, spec, onProgress) {
       // back to the Builder to fix, instead of only being reported at the end.
       for (let cround = 1; cround <= 2; cround++) {
         if (fixBudget.ops <= 0) break;
-        const conf = await checkConformance(llm, spec, mod, summary);
+        const conf = await checkConformance(verifierLLM, spec, mod, summary); // Verifier reviews
         if (!conf || conf.conforms) break; // conforms, or inconclusive
         fixBudget.ops--;
         if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
@@ -758,7 +771,7 @@ async function buildDesign(llm, spec, onProgress) {
           // baseline above lets this path tell a broken testbench from a broken module.
           if (structuralOk) {
             try {
-              await localizeAndFix(llm, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
+              await localizeAndFix(llm, verifierLLM, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
             } catch (e) { entry.funcTbOutput = String((e && e.message) || e); }
             entry.verification = entry.verification === "functional" ? "functional" : "unverified";
           } else {
