@@ -247,9 +247,17 @@ function findTopDesignModule(files) {
   const excluded = [];
   files.forEach((f) => {
     const mods = parseModules(f.code);
-    // Drop a file only if EVERY module in it is a testbench, so a file holding a
-    // design module plus a small tb still gets synthesized.
-    if (mods.length && mods.every(isTestbenchModule)) excluded.push(f.name);
+    // A file is testbench INFRASTRUCTURE if it contains a testbench TOP — a
+    // portless module, or a tb-named clock generator. Its OTHER modules (a
+    // stimulus generator, a scoreboard) have ports and look like design, but they
+    // only exist to drive the testbench, so the whole file must be excluded.
+    // (Also exclude a file that is entirely testbench modules.)
+    const hasTbTop = mods.some((m) => {
+      const portless = /^\s*;/.test(m.body) || /^\s*\(\s*\)\s*;/.test(m.body);
+      const simClock = /always\s*#/.test(m.body) || /forever\s*#/.test(m.body);
+      return portless || (/^(tb|testbench)$/i.test(m.name) && simClock);
+    });
+    if (mods.length && (hasTbTop || mods.every(isTestbenchModule))) excluded.push(f.name);
     else designFiles.push(f);
   });
 

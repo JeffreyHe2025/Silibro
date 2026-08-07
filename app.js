@@ -636,6 +636,20 @@
     if (d && d.id && files.some(function (f) { return f.id === d.id; })) return d.id;
     return null;
   }
+  // The MODULE name of the user-selected top file (for synthesis). Prefers the
+  // module whose name matches the filename, else the file's first module.
+  function selectedTopModule() {
+    var topId = resolveTop();
+    if (!topId) return "";
+    var f = files.find(function (x) { return x.id === topId; });
+    if (!f) return "";
+    var names = [];
+    var re = /\bmodule\s+(\w+)/g, m;
+    while ((m = re.exec(f.code || ""))) names.push(m[1]);
+    if (!names.length) return "";
+    var base = (f.name || "").replace(/\.(v|sv|svh|vh)$/i, "");
+    return names.indexOf(base) >= 0 ? base : names[0];
+  }
 
   // The AI can declare the top via a "TOP: <filename>" line (won't override a
   // top the user set manually).
@@ -3230,10 +3244,12 @@
     synthProjectBtn.disabled = true;
     consoleLog("⚙ synthesizing the whole project with yosys…", "info");
     try {
+      var topMod = selectedTopModule(); // honor the user's chosen TOP file
+      if (topMod) consoleLog("   • top module: " + topMod + " (from your TOP selection)", "log");
       var resp = await fetch(base + "/synthesize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: vfiles }),
+        body: JSON.stringify(topMod ? { files: vfiles, top: topMod } : { files: vfiles }),
       });
       var data = await resp.json();
       if (data.error) { consoleLog("✗ synthesis: " + data.error, "error"); return; }
