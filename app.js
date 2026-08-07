@@ -117,6 +117,7 @@
   var moreMenu = $("more-menu");
   var tbProjectBtn = $("tb-project");
   var runSimBtn = $("run-sim");
+  var synthProjectBtn = $("synth-project");
   var tbprojModal = $("tbproj-modal");
   var tbprojImportBtn = $("tbproj-import");
   var tbprojAiBtn = $("tbproj-ai");
@@ -3211,6 +3212,84 @@
       runSimBtn.disabled = false;
     }
   });
+  // ---- Synthesize the WHOLE project with yosys (the final step) --------------
+  // Run this once the LLMs have finished building and verifying: it takes the
+  // assembled design (testbenches excluded automatically), runs the full yosys
+  // synthesis flow, and reports the gate-level result — cells, flip-flops, logic
+  // depth — saving the netlist into the project as netlist.v. No LLM involved.
+  if (synthProjectBtn) synthProjectBtn.addEventListener("click", async function () {
+    if (moreMenu) moreMenu.classList.add("hidden");
+    if (currentProjectId == null) { alert("Open a project first."); return; }
+    var base = getBackendUrl();
+    if (!base) { alert("Set a backend first (Console → ⚙ Backend)."); return; }
+    syncCurrentFileFromEditor();
+    var vfiles = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })
+      .map(function (f) { return { name: f.name, code: f.code || "" }; });
+    if (!vfiles.length) { alert("No Verilog files to synthesize yet."); return; }
+
+    synthProjectBtn.disabled = true;
+    consoleLog("⚙ synthesizing the whole project with yosys…", "info");
+    try {
+      var resp = await fetch(base + "/synthesize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: vfiles }),
+      });
+      var data = await resp.json();
+      if (data.error) { consoleLog("✗ synthesis: " + data.error, "error"); return; }
+
+      if (data.excluded && data.excluded.length)
+        consoleLog("   • excluded from synthesis (testbenches): " + data.excluded.join(", "), "log");
+
+      if (!data.ok) {
+        consoleLog("✗ synthesis FAILED ✗" + (data.top ? " (top: " + data.top + ")" : ""), "error");
+        (data.errors || []).forEach(function (e) { consoleLog("   " + e, "error"); });
+        if (data.output) {
+          consoleLog("── yosys log (tail) ──", "info");
+          String(data.output).split("\n").slice(-25).forEach(function (ln) { consoleLog("   " + ln, "log"); });
+        }
+        return;
+      }
+
+      var s = data.stats || {};
+      consoleLog("✓ synthesis PASSED ✓ — top module: " + data.top, "ok");
+      consoleLog("   • cells: " + (s.cells != null ? s.cells : "?") +
+        "  |  flip-flops: " + (s.flipFlops != null ? s.flipFlops : "?") +
+        "  |  wires: " + (s.wires != null ? s.wires : "?"), "log");
+      if (data.longestPath != null)
+        consoleLog("   • longest combinational path: " + data.longestPath + " logic levels (rough depth — lower means a faster clock)", "log");
+      if (s.area != null) consoleLog("   • chip area: " + s.area, "log");
+      if (s.memoryBits) consoleLog("   • inferred memory: " + s.memoryBits + " bits", "log");
+      if (s.cellTypes && s.cellTypes.length) {
+        var top5 = s.cellTypes.slice().sort(function (a, b) { return b.count - a.count; }).slice(0, 6);
+        consoleLog("   • gate mix: " + top5.map(function (c) { return c.name + "×" + c.count; }).join(", "), "log");
+      }
+      (data.warnings || []).slice(0, 8).forEach(function (w) { consoleLog("   ⚠ " + w, "warn"); });
+
+      // Save the netlist into the project — overwrite the previous one rather
+      // than piling up netlist(1).v, netlist(2).v … on every re-synthesis.
+      if (data.netlist) {
+        var existing = files.find(function (f) { return f.name === "netlist.v"; });
+        if (existing) {
+          var ures = await dbUpdateFile(existing.id, { name: "netlist.v", code: data.netlist });
+          if (!ures.error) { existing.code = data.netlist; consoleLog("📦 updated netlist.v (gate-level netlist)", "ok"); }
+        } else {
+          var cres = await dbCreateFile(currentProjectId, "netlist.v", data.netlist);
+          if (!cres.error) {
+            files.push(cres.data);
+            files.sort(function (a, b) { return (a.name || "").localeCompare(b.name || ""); });
+            renderFileList();
+            consoleLog("📦 wrote netlist.v (gate-level netlist)", "ok");
+          }
+        }
+      }
+    } catch (e) {
+      consoleLog("✗ synthesis: couldn't reach the backend — " + ((e && e.message) || e), "error");
+    } finally {
+      synthProjectBtn.disabled = false;
+    }
+  });
+
   if (tbprojCancelBtn) tbprojCancelBtn.addEventListener("click", function () {
     tbprojModal.classList.add("hidden");
   });

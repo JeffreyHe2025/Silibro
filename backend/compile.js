@@ -211,6 +211,248 @@ function runTestbench(files, tbTop) {
   });
 }
 
+// --- Whole-project synthesis (final step, after build + verification) --------
+
+// Split Verilog source into its modules: [{name, body}] where body is everything
+// between the module name and endmodule (so it starts with the port list, or ';'
+// when the module is portless). Comments are stripped first.
+function parseModules(code) {
+  const src = String(code || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const mods = [];
+  const re = /\bmodule\s+(\w+)\b([\s\S]*?)\bendmodule\b/g;
+  let m;
+  while ((m = re.exec(src))) mods.push({ name: m[1], body: m[2] });
+  return mods;
+}
+
+// Is this module a TESTBENCH rather than part of the design? A testbench has no
+// ports (nothing drives it from outside) or generates its own clock with delays.
+// Testbenches must be excluded before synthesis — they're full of the sim-only
+// constructs (#delays, $display, initial) that synthesis cannot map to hardware.
+function isTestbenchModule(mod) {
+  const portless = /^\s*;/.test(mod.body) || /^\s*\(\s*\)\s*;/.test(mod.body);
+  const tbName = /^(tb|testbench)$/i.test(mod.name) || /(_tb$|^tb_|_test$|bench)/i.test(mod.name);
+  const simClock = /always\s*#/.test(mod.body) || /forever\s*#/.test(mod.body);
+  return portless || (tbName && simClock);
+}
+
+// Pick the top-level DESIGN module for synthesis: the design module that no other
+// design module instantiates. Testbenches are ignored entirely (they'd otherwise
+// look like the root). Returns { top, roots, designFiles, excluded }.
+//   roots — every design root found. More than one means the project has several
+//           unconnected designs, so the caller must ask which to synthesize.
+//   excluded — files dropped as testbenches.
+function findTopDesignModule(files) {
+  const designFiles = [];
+  const excluded = [];
+  files.forEach((f) => {
+    const mods = parseModules(f.code);
+    // Drop a file only if EVERY module in it is a testbench, so a file holding a
+    // design module plus a small tb still gets synthesized.
+    if (mods.length && mods.every(isTestbenchModule)) excluded.push(f.name);
+    else designFiles.push(f);
+  });
+
+  const mods = [];
+  designFiles.forEach((f) => parseModules(f.code).forEach((m) => {
+    if (!isTestbenchModule(m)) mods.push(m);
+  }));
+  if (!mods.length) return { top: "", roots: [], designFiles, excluded };
+
+  // A module is INSTANTIATED if another module references it as an instance:
+  //   Name [#(...params...)] instName (   — the #(...) may contain nested parens.
+  const names = mods.map((x) => x.name);
+  const instantiated = new Set();
+  mods.forEach((host) => {
+    names.forEach((n) => {
+      if (n === host.name) return;
+      const rx = new RegExp("\\b" + n + "\\b\\s*(?:#\\s*\\([^)]*(?:\\([^)]*\\)[^)]*)*\\))?\\s*\\w+\\s*\\(");
+      if (rx.test(host.body)) instantiated.add(n);
+    });
+  });
+  const roots = mods.filter((x) => !instantiated.has(x.name)).map((x) => x.name);
+  return { top: roots.length === 1 ? roots[0] : "", roots, designFiles, excluded };
+}
+
+// Parse a `stat` block out of the yosys log into numbers. Yosys prints either a
+// "=== design hierarchy ===" summary (multi-module, counts INCLUDING submodules)
+// or a single "=== <module> ===" block. Both use the same "<count> <label>" rows,
+// with cell types indented under the "cells" row. Missing counts print as '-'.
+function parseYosysStat(log) {
+  const text = String(log || "");
+  const hier = text.lastIndexOf("=== design hierarchy ===");
+  const start = hier >= 0 ? hier : text.lastIndexOf("\n=== ");
+  if (start < 0) return null;
+  // The block ends at the next yosys pass header ("N. Executing ...") or EOF.
+  const rest = text.slice(start);
+  const end = rest.search(/\n\s*\d+(\.\d+)*\.\s+(Executing|Printing)/);
+  const block = end > 0 ? rest.slice(0, end) : rest;
+
+  const stats = { cellTypes: [], submoduleUses: [] };
+  const LABELS = {
+    wires: "wires", "wire bits": "wireBits", "public wires": "publicWires",
+    "public wire bits": "publicWireBits", ports: "ports", "port bits": "portBits",
+    memories: "memories", "memory bits": "memoryBits", processes: "processes",
+    cells: "cells", submodules: "submodules",
+  };
+  // The indented breakdown rows belong to whichever totals row came last: the
+  // "cells" row is followed by cell types, the "submodules" row by instance
+  // counts. Without tracking that, submodules get counted as gates.
+  let section = "";
+  block.split("\n").forEach((line) => {
+    // Totals row: "       47 cells"  ('-' means zero)
+    let m = line.match(/^\s*(\d+|-)\s+([a-z ]+?)\s*$/);
+    if (m && LABELS[m[2]]) {
+      stats[LABELS[m[2]]] = m[1] === "-" ? 0 : parseInt(m[1], 10);
+      section = m[2] === "cells" ? "cells" : m[2] === "submodules" ? "submodules" : "";
+      return;
+    }
+    // Breakdown row: "        9   $_DFF_PN0_"  (two+ spaces before the name)
+    m = line.match(/^\s*(\d+)\s{2,}([\w$\\.]+)\s*$/);
+    if (m) {
+      const row = { name: m[2], count: parseInt(m[1], 10) };
+      if (section === "submodules") stats.submoduleUses.push(row);
+      else if (section === "cells") stats.cellTypes.push(row);
+      return;
+    }
+    // With -liberty: "Chip area for top module '\top': 1234.56"
+    m = line.match(/Chip area for (?:top )?module .*?:\s*([\d.]+)/);
+    if (m) stats.area = parseFloat(m[1]);
+  });
+
+  // Sequential elements, so the report can say "N flip-flops" — generic yosys
+  // gate names ($_DFF_P_, $_SDFFE_PP0P_, $_DLATCH_N_) and liberty cell names.
+  stats.flipFlops = stats.cellTypes
+    .filter((c) => /^\$_(S?DFFE?|DFFSR|ADFF|ALDFF|DLATCH|SR)/i.test(c.name) || /\b(dff|dlatch|sdff)/i.test(c.name))
+    .reduce((n, c) => n + c.count, 0);
+  return stats;
+}
+
+// FINAL WHOLE-PROJECT SYNTHESIS. Unlike synthCheck (a light per-module "can this
+// become hardware?" gate run during the build), this runs the FULL yosys `synth`
+// flow on the assembled design — proc, fsm, memory inference, techmap and gate
+// mapping — and reports the resulting netlist plus area/cell statistics. This is
+// what you run once, at the end, after the LLMs have finished building and
+// verifying. ($0 — local tool, no API.)
+//
+// @param files  [{name, code}] — the whole project; testbenches are auto-excluded
+// @param opts   { top?, liberty?, timeout? }
+//   top      explicit top module (otherwise detected; ambiguity is an error)
+//   liberty  path to a .lib standard-cell library — maps to real cells and gives
+//            a true chip-area number instead of generic gate counts
+// @returns {Promise<{ok, top, roots, excluded, stats, longestPath, netlist,
+//                    warnings, errors, output}>}
+function synthesizeProject(files, opts) {
+  opts = opts || {};
+  return new Promise((resolve) => {
+    const vfiles = (files || []).filter((f) => f && /\.s?v$/i.test(f.name));
+    if (!vfiles.length) {
+      resolve({ ok: false, errors: ["no Verilog files to synthesize"], output: "" });
+      return;
+    }
+
+    const detected = findTopDesignModule(vfiles);
+    const top = opts.top || detected.top;
+    if (!top) {
+      resolve({
+        ok: false,
+        roots: detected.roots,
+        excluded: detected.excluded,
+        errors: [
+          detected.roots.length > 1
+            ? "the project has more than one top-level design module (" +
+              detected.roots.join(", ") + ") — pass `top` to choose one"
+            : "could not find a top-level design module to synthesize",
+        ],
+        output: "",
+      });
+      return;
+    }
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsynthproj-"));
+    try {
+      // Only the design files go in — a testbench would drag $display/#delay into
+      // synthesis and fail (or be silently stripped, which is worse).
+      const names = detected.designFiles.map((f) => {
+        fs.writeFileSync(path.join(dir, f.name), f.code || "");
+        return f.name;
+      });
+
+      // Yosys IGNORES some sim-only constructs (notably #delays) instead of
+      // erroring, so a design containing them would synthesize "clean" into
+      // hardware that doesn't match simulation. Scan for them separately — same
+      // check the per-module synthCheck does, applied to the whole design.
+      const simOnly = detected.designFiles
+        .map((f) => ({ file: f.name, reason: nonSynthConstructs(f.code) }))
+        .filter((x) => x.reason);
+
+      const lib = opts.liberty ? '"' + opts.liberty + '"' : "";
+      const script = [
+        "read_verilog -sv " + names.map((n) => '"' + n + '"').join(" "),
+        "hierarchy -check -top " + top,
+        "synth -top " + top,                       // the full generic flow
+        ...(lib ? ["dfflibmap -liberty " + lib, "abc -liberty " + lib, "opt_clean"] : []),
+        "write_verilog -noattr netlist.v",         // gate-level netlist
+        "write_json netlist.json",                 // machine-readable (nextpnr etc.)
+        "stat -top " + top + (lib ? " -liberty " + lib : ""),
+        "check -assert",                           // undriven / multi-driver / loops
+        "flatten",                                 // depth across the hierarchy...
+        "opt_clean",
+        "ltp -noff",                               // ...combinational path length
+      ].join("\n");
+      fs.writeFileSync(path.join(dir, "synth.ys"), script);
+
+      execFile(
+        "yosys",
+        ["-s", "synth.ys"],
+        { cwd: dir, timeout: opts.timeout || 180000, maxBuffer: 32 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          const log = (stdout || "") + "\n" + (stderr || "");
+          let netlist = "";
+          try { netlist = fs.readFileSync(path.join(dir, "netlist.v"), "utf8"); } catch (_) {}
+          try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+
+          if (err && err.code === "ENOENT") {
+            resolve({
+              ok: false, top: top, available: false,
+              errors: ["yosys is not installed on the backend (brew install yosys)"],
+              output: "",
+            });
+            return;
+          }
+
+          const errors = (log.match(/^ERROR:.*$/gm) || []).map((s) => s.trim());
+          const warnings = (log.match(/^Warning:.*$/gm) || []).map((s) => s.trim());
+          const ltp = log.match(/Longest topological path in [^(]*\(length=(\d+)\)/);
+          // Sim-only constructs don't stop yosys, but they DO mean the netlist
+          // won't behave like the simulation — so they fail the run.
+          simOnly.forEach((x) =>
+            errors.unshift("non-synthesizable in " + x.file + ": " + x.reason + " (yosys silently ignores it)")
+          );
+
+          resolve({
+            ok: !err && !errors.length,
+            available: true,
+            top: top,
+            roots: detected.roots,
+            excluded: detected.excluded,
+            stats: parseYosysStat(log),
+            longestPath: ltp ? parseInt(ltp[1], 10) : null,
+            netlist: netlist,
+            warnings: warnings.slice(0, 40),
+            errors: errors.slice(0, 20),
+            // Tail of the log: where the failure is, when there is one.
+            output: log.trim().slice(-6000),
+          });
+        }
+      );
+    } catch (e) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+      resolve({ ok: false, top: top, errors: [String((e && e.message) || e)], output: "" });
+    }
+  });
+}
+
 // Find the top module to simulate for a (possibly multi-module) testbench file.
 // The TOP is the module that no other module instantiates (the root) — NOT just
 // any module with $finish (a scoreboard/checker often has $finish too). Returns a
@@ -253,4 +495,4 @@ function findTopModule(code) {
   ).name;
 }
 
-module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, runTestbench, findTopModule };
+module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, synthesizeProject, findTopDesignModule, runTestbench, findTopModule };

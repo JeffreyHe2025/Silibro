@@ -11,13 +11,14 @@ dependencies → on a compile error, feed the error back to the LLM and retry.
 | ------------ | -------------------------------------------------------------- |
 | `server.js`  | Express API: `POST /build`, `POST /compile`, `GET /health`     |
 | `build.js`   | plan → topo-sort → build+check loop                            |
-| `compile.js` | runs `iverilog` on a set of files, returns `{ ok, output }`    |
+| `compile.js` | runs `iverilog` / `yosys` on a set of files, returns `{ ok, output }` |
 | `llm.js`     | BYOK LLM caller (Gemini / OpenRouter / OpenAI)                 |
 
 ## Prerequisites (on the EC2 box)
 ```bash
-# Icarus Verilog
-sudo apt update && sudo apt install -y iverilog
+# Icarus Verilog (compile + simulate) and Yosys (synthesis)
+sudo apt update && sudo apt install -y iverilog yosys
+yosys -V           # 0.30+ recommended
 
 # Node 18+ (needs global fetch). Ubuntu's default may be older — install NodeSource:
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
@@ -45,6 +46,18 @@ curl -s localhost:3000/compile -H 'Content-Type: application/json' -d '{
   "top": "counter"
 }'
 ```
+
+Synthesize the whole project with Yosys (the final step, after building and
+verifying — no LLM key needed):
+```bash
+curl -s localhost:3000/synthesize -H 'Content-Type: application/json' -d '{
+  "files": [{"name":"counter.v","code":"module counter(input clk, output reg [3:0] q); always @(posedge clk) q<=q+1; endmodule"}]
+}' | python3 -m json.tool
+```
+Returns `{ ok, top, stats, longestPath, netlist, warnings, errors }`. The top
+module is detected automatically (testbench files are excluded); pass `"top"`
+explicitly if the project has several unconnected roots, and `"liberty"` (path
+to a `.lib`) to map to real standard cells and get a chip-area number.
 
 Full bottom-up build (uses YOUR LLM key — free Gemini works):
 ```bash

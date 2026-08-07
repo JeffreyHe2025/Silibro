@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
-const { compileVerilog, compileReport, runTestbench, findTopModule } = require("./compile");
+const { compileVerilog, compileReport, runTestbench, findTopModule, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow } = require("./flow");
 
 const app = express();
@@ -126,6 +126,24 @@ app.post("/testbench/run", async (req, res) => {
     if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out)) passed = false;
     else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out)) passed = true;
     res.json({ top, passed, compileFailed: false, output: out.slice(0, 4000) });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// FINAL WHOLE-PROJECT SYNTHESIS with yosys — run this after the LLMs have
+// finished building and verifying. Runs the full `synth` flow on the assembled
+// design (testbenches excluded automatically) and returns the gate-level netlist
+// plus area/cell statistics. No LLM involved, so no API key is needed.
+//   body: { files:[{name,code}], top?, liberty? }
+//   -> { ok, top, stats, longestPath, netlist, warnings, errors, output }
+app.post("/synthesize", async (req, res) => {
+  const { files, top, liberty } = req.body || {};
+  if (!Array.isArray(files) || !files.length) {
+    return res.status(400).json({ error: "files: [{name, code}] required" });
+  }
+  try {
+    res.json(await synthesizeProject(files, { top, liberty }));
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }
