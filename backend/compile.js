@@ -344,10 +344,8 @@ function parseYosysStat(log) {
 // verifying. ($0 — local tool, no API.)
 //
 // @param files  [{name, code}] — the whole project; testbenches are auto-excluded
-// @param opts   { top?, liberty?, timeout? }
+// @param opts   { top?, timeout? }
 //   top      explicit top module (otherwise detected; ambiguity is an error)
-//   liberty  path to a .lib standard-cell library — maps to real cells and gives
-//            a true chip-area number instead of generic gate counts
 // @returns {Promise<{ok, top, roots, excluded, stats, longestPath, netlist,
 //                    warnings, errors, output}>}
 function synthesizeProject(files, opts) {
@@ -376,14 +374,25 @@ function synthesizeProject(files, opts) {
       });
       return;
     }
+    // `top` and file names get embedded in the yosys script, which supports shell
+    // escapes (exec / !cmd). A caller-supplied top must be a plain Verilog
+    // identifier — never anything that could inject a script command.
+    if (!/^[A-Za-z_]\w*$/.test(top)) {
+      resolve({ ok: false, errors: ["invalid top module name: " + String(top).slice(0, 40)], output: "" });
+      return;
+    }
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsynthproj-"));
     try {
       // Only the design files go in — a testbench would drag $display/#delay into
-      // synthesis and fail (or be silently stripped, which is worse).
-      const names = detected.designFiles.map((f) => {
-        fs.writeFileSync(path.join(dir, f.name), f.code || "");
-        return f.name;
+      // synthesis and fail (or be silently stripped, which is worse). Write them
+      // under safe generated names (src0.v, src1.v, …) so a crafted filename can't
+      // path-traverse or inject into the script — module names inside the files
+      // are what synthesis uses, not the filenames.
+      const names = detected.designFiles.map((f, i) => {
+        const safe = "src" + i + ".v";
+        fs.writeFileSync(path.join(dir, safe), f.code || "");
+        return safe;
       });
 
       // Yosys IGNORES some sim-only constructs (notably #delays) instead of
@@ -394,15 +403,13 @@ function synthesizeProject(files, opts) {
         .map((f) => ({ file: f.name, reason: nonSynthConstructs(f.code) }))
         .filter((x) => x.reason);
 
-      const lib = opts.liberty ? '"' + opts.liberty + '"' : "";
       const script = [
         "read_verilog -sv " + names.map((n) => '"' + n + '"').join(" "),
         "hierarchy -check -top " + top,
         "synth -top " + top,                       // the full generic flow
-        ...(lib ? ["dfflibmap -liberty " + lib, "abc -liberty " + lib, "opt_clean"] : []),
         "write_verilog -noattr netlist.v",         // gate-level netlist
         "write_json netlist.json",                 // machine-readable (nextpnr etc.)
-        "stat -top " + top + (lib ? " -liberty " + lib : ""),
+        "stat -top " + top,
         "check -assert",                           // undriven / multi-driver / loops
         "flatten",                                 // depth across the hierarchy...
         "opt_clean",

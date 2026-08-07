@@ -135,15 +135,15 @@ app.post("/testbench/run", async (req, res) => {
 // finished building and verifying. Runs the full `synth` flow on the assembled
 // design (testbenches excluded automatically) and returns the gate-level netlist
 // plus area/cell statistics. No LLM involved, so no API key is needed.
-//   body: { files:[{name,code}], top?, liberty? }
+//   body: { files:[{name,code}], top? }
 //   -> { ok, top, stats, longestPath, netlist, warnings, errors, output }
 app.post("/synthesize", async (req, res) => {
-  const { files, top, liberty } = req.body || {};
+  const { files, top } = req.body || {};
   if (!Array.isArray(files) || !files.length) {
     return res.status(400).json({ error: "files: [{name, code}] required" });
   }
   try {
-    res.json(await synthesizeProject(files, { top, liberty }));
+    res.json(await synthesizeProject(files, { top }));
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }
