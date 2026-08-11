@@ -316,8 +316,9 @@
         mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "default" });
       } catch (e) { /* mermaid optional */ }
     }
-    // Keep the 📊 Diagram button in sync as the file's content changes.
+    // Keep the 📊 Diagram and ▶ Run simulation buttons in sync as content changes.
     editor.on("change", updateDiagramButton);
+    editor.on("change", updateRunSimButton);
   }
 
   // ---------------------------------------------------------------------------
@@ -342,6 +343,26 @@
       viewDiagramBtn.classList.add("hidden");
       hideDiagram();
     }
+  }
+
+  // A file is runnable in simulation only if it's Verilog AND has a simulation
+  // entry point (an initial block, or $finish/$dumpvars) — i.e. a self-contained
+  // testbench that actually drives and prints something. A design module with no
+  // stimulus, or a non-Verilog file, is not runnable → Run simulation is grayed out.
+  function isRunnableTestbench(name, code) {
+    if (!isVerilogName(name)) return false;
+    var c = String(code || "");
+    return /\binitial\b/.test(c) || /\$finish\b/.test(c) || /\$dumpvars\b/.test(c);
+  }
+  function updateRunSimButton() {
+    if (!runSimBtn) return;
+    var name = fileNameInput ? fileNameInput.value.trim() : "";
+    var code = editor ? editor.getValue() : "";
+    var ok = currentFileId != null && isRunnableTestbench(name, code);
+    runSimBtn.disabled = !ok;
+    runSimBtn.title = ok
+      ? "Run this file with the simulator (vvp) and show the result"
+      : "Open a self-contained Verilog testbench (has an initial block / $finish) to run it";
   }
 
   function hideDiagram() {
@@ -766,6 +787,7 @@
     editor.session.setMode(modeForFile(f.name));
     hideDiagram();
     updateDiagramButton();
+    updateRunSimButton();
     updateSpecButton();
     openEditorPanel();
     renderFileList();
@@ -3225,38 +3247,40 @@
   });
   // Run the CURRENTLY OPEN testbench against the whole project with the simulator
   // (vvp) and show the real result — for imported / hand-written testbenches.
+  // Run simulation compiles + runs ONLY the currently-open file (self-contained
+  // testbench) with vvp. No cross-project top detection. The button is disabled
+  // (grayed out) unless the current file is a runnable Verilog testbench — see
+  // isRunnableTestbench / updateRunSimButton below.
   if (runSimBtn) runSimBtn.addEventListener("click", async function () {
     if (moreMenu) moreMenu.classList.add("hidden");
-    if (currentProjectId == null) { alert("Open a project first."); return; }
+    if (currentProjectId == null) return;
     var base = getBackendUrl();
     if (!base) { alert("Set a backend first (Console → ⚙ Backend)."); return; }
     syncCurrentFileFromEditor();
-    var tbFile = fileNameInput.value.trim();
-    if (!isVerilogName(tbFile)) { alert("Open your testbench (.v) file first, then Run simulation."); return; }
-    var vfiles = files.filter(function (f) { return isVerilogName(f.name); })
-      .map(function (f) { return { name: f.name, code: f.code || "" }; });
-    if (!vfiles.length) { alert("No Verilog files to simulate yet."); return; }
+    var name = fileNameInput.value.trim();
+    var code = editor ? editor.getValue() : "";
+    if (!isRunnableTestbench(name, code)) return; // shouldn't happen (button disabled)
     runSimBtn.disabled = true;
-    consoleLog("▶ simulating with testbench " + tbFile + " (vvp)…", "info");
+    consoleLog("▶ simulating " + name + " (vvp)…", "info");
     try {
       var resp = await fetch(base + "/testbench/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: vfiles, tbFile: tbFile }),
+        body: JSON.stringify({ files: [{ name: name, code: code }] }),
       });
       var data = await resp.json();
       if (data.error) { consoleLog("✗ simulation: " + data.error, "error"); return; }
       var out = String(data.output || "").trim();
       if (data.compileFailed) {
-        consoleLog("✗ simulation: design + testbench won't compile (top: " + data.top + ")", "error");
+        consoleLog("✗ simulation: " + name + " won't compile (missing modules must be in this file)", "error");
       } else if (data.passed === true) {
-        consoleLog("✓ simulation PASSED ✓ (top module: " + data.top + ")", "ok");
+        consoleLog("✓ simulation PASSED ✓", "ok");
       } else if (data.passed === false) {
-        consoleLog("✗ simulation FAILED ✗ (top module: " + data.top + ")", "error");
+        consoleLog("✗ simulation FAILED ✗", "error");
       } else if (out) {
-        consoleLog("• simulation ran (top module: " + data.top + ") — no clear PASS/FAIL marker; read the output below", "warn");
+        consoleLog("• simulation ran — no clear PASS/FAIL marker; read the output below", "warn");
       } else {
-        consoleLog("• simulation ran (top module: " + data.top + ") but produced NO output — the testbench printed nothing. Check that '" + data.top + "' is your real top-level testbench and that it $display's a result.", "warn");
+        consoleLog("• simulation ran but produced NO output — the file printed nothing ($display/$monitor).", "warn");
       }
       if (out) {
         consoleLog("── simulation output ──", "info");
@@ -3265,9 +3289,10 @@
     } catch (e) {
       consoleLog("✗ simulation: couldn't reach the backend — " + ((e && e.message) || e), "error");
     } finally {
-      runSimBtn.disabled = false;
+      updateRunSimButton(); // re-enable per current-file state
     }
   });
+  updateRunSimButton(); // initial state (disabled until a runnable file is open)
   // ---- Synthesize the WHOLE project with yosys (the final step) --------------
   // Run this once the LLMs have finished building and verifying: it takes the
   // assembled design (testbenches excluded automatically), runs the full yosys

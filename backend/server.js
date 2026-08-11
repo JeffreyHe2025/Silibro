@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
-const { compileVerilog, compileReport, runTestbench, findTopModule, synthesizeProject } = require("./compile");
+const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow } = require("./flow");
 
 const app = express();
@@ -94,10 +94,12 @@ app.post("/testbench", async (req, res) => {
 // Compiles the project + testbench and runs vvp, returning the RAW simulation
 // output plus a best-effort pass/fail read from common markers. Unlike /testbench,
 // this does NOT generate a testbench — it runs the one already in the files.
-//   body: { files:[{name,code}], tbFile?, tbTop? }
-//   -> { top, passed:true|false|null, compileFailed, output }
+// Runs ONLY the file(s) provided (the frontend sends just the current file), with
+// no cross-project top-module detection — iverilog auto-picks the file's root.
+//   body: { files:[{name,code}] }
+//   -> { passed:true|false|null, compileFailed, output }
 app.post("/testbench/run", async (req, res) => {
-  const { files, tbFile, tbTop } = req.body || {};
+  const { files } = req.body || {};
   if (!Array.isArray(files) || !files.length) {
     return res.status(400).json({ error: "files: [{name, code}] required" });
   }
@@ -105,19 +107,9 @@ app.post("/testbench/run", async (req, res) => {
     const vfiles = files.filter((f) => f && /\.s?v$/i.test(f.name));
     if (!vfiles.length) return res.json({ error: "no Verilog files provided" });
 
-    // Pick the testbench top: caller-given, else detect from the named tb file,
-    // else detect across all files.
-    let top = tbTop;
-    if (!top && tbFile) {
-      const tf = vfiles.find((f) => f.name === tbFile);
-      if (tf) top = findTopModule(tf.code);
-    }
-    if (!top) top = findTopModule(vfiles.map((f) => f.code || "").join("\n"));
-    if (!top) return res.json({ error: "could not determine the testbench's top module" });
-
-    const sim = await runTestbench(vfiles, top);
+    const sim = await runTestbench(vfiles); // no tbTop → iverilog auto-picks the root
     if (sim.compileFailed) {
-      return res.json({ top, passed: null, compileFailed: true, output: (sim.output || "").slice(0, 4000) });
+      return res.json({ passed: null, compileFailed: true, output: (sim.output || "").slice(0, 4000) });
     }
     // Best-effort verdict from common markers (user testbenches vary); FAIL wins
     // over PASS. When nothing clear is printed, leave it null and show raw output.
@@ -125,7 +117,7 @@ app.post("/testbench/run", async (req, res) => {
     let passed = null;
     if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out)) passed = false;
     else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out)) passed = true;
-    res.json({ top, passed, compileFailed: false, output: out.slice(0, 4000) });
+    res.json({ passed, compileFailed: false, output: out.slice(0, 4000) });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }
