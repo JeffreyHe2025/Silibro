@@ -118,8 +118,11 @@ app.post("/testbench/run", async (req, res) => {
     if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out) || /\berrors?\s*=\s*[1-9]/i.test(out)) passed = false;
     else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out) || /\berrors?\s*=\s*0\b/i.test(out)) passed = true;
     // Return the full log (bounded generously) — a 200-result scoreboard needs
-    // far more than the old 4 KB, which cut off mid-line around line ~67.
-    res.json({ passed, compileFailed: false, output: out.slice(0, 500000) });
+    // far more than the old 4 KB, which cut off mid-line around line ~67. If it
+    // STILL exceeds the cap, flag it so the UI can say "truncated" rather than
+    // looking frozen.
+    const CAP = 500000;
+    res.json({ passed, compileFailed: false, output: out.slice(0, CAP), truncated: out.length > CAP, fullBytes: out.length });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }

@@ -3328,6 +3328,10 @@
       if (out) {
         consoleLog("── simulation output ──", "info");
         out.split("\n").forEach(function (ln) { consoleLog("   " + ln, "log"); });
+        if (data.truncated) {
+          var kb = Math.round((data.fullBytes || out.length) / 1024);
+          consoleLog("⚠ output cut off here — the simulation printed " + kb + " KB, more than the display limit. It did NOT freeze; reduce $display volume to see the rest.", "warn");
+        }
       }
     } catch (e) {
       consoleLog("✗ simulation: couldn't reach the backend — " + ((e && e.message) || e), "error");
