@@ -345,24 +345,63 @@
     }
   }
 
-  // A file is runnable in simulation only if it's Verilog AND has a simulation
-  // entry point (an initial block, or $finish/$dumpvars) — i.e. a self-contained
-  // testbench that actually drives and prints something. A design module with no
-  // stimulus, or a non-Verilog file, is not runnable → Run simulation is grayed out.
-  function isRunnableTestbench(name, code) {
-    if (!isVerilogName(name)) return false;
-    var c = String(code || "");
-    return /\binitial\b/.test(c) || /\$finish\b/.test(c) || /\$dumpvars\b/.test(c);
-  }
+  // Run simulation is available for any Verilog file — it compiles that file plus
+  // the modules (in other files) it instantiates, transitively. Non-Verilog files
+  // (.md etc.) aren't runnable → the button is grayed out.
   function updateRunSimButton() {
     if (!runSimBtn) return;
     var name = fileNameInput ? fileNameInput.value.trim() : "";
-    var code = editor ? editor.getValue() : "";
-    var ok = currentFileId != null && isRunnableTestbench(name, code);
+    var ok = currentFileId != null && isVerilogName(name);
     runSimBtn.disabled = !ok;
     runSimBtn.title = ok
-      ? "Run this file with the simulator (vvp) and show the result"
-      : "Open a self-contained Verilog testbench (has an initial block / $finish) to run it";
+      ? "Compile this file + the modules it uses (from other files) and run with vvp"
+      : "Open a Verilog (.v/.sv) file to run it";
+  }
+
+  // Files needed to simulate the current file: itself, plus every file that
+  // defines a module instantiated (transitively) by the included files. When a
+  // module is defined in more than one file, prefer the current file, then RTL,
+  // then synthesized netlists — and never include a file twice, so duplicate
+  // module declarations (e.g. dot_product in both dot_product.v and netlist.v)
+  // can't collide. Returns [{name, code}].
+  function collectSimFiles(startName, startCode) {
+    var strip = function (s) { return String(s || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, ""); };
+    var isNetlist = function (n) { return /(^|[_.])netlist\.v$/i.test(n) || /_(syn|gate|netlist)\.v$/i.test(n); };
+    var vFiles = files.filter(function (f) { return isVerilogName(f.name); })
+      .map(function (f) { return { name: f.name, code: f.name === startName ? startCode : (f.code || "") }; });
+    var codeOf = {};
+    vFiles.forEach(function (f) { codeOf[f.name] = f.code; });
+    // Build moduleName -> defining file, preferring current > RTL > netlist.
+    var order = vFiles.slice().sort(function (a, b) {
+      var rank = function (n) { return n === startName ? 0 : isNetlist(n) ? 2 : 1; };
+      return rank(a.name) - rank(b.name);
+    });
+    var defOf = {}, allNames = [];
+    order.forEach(function (f) {
+      var re = /\bmodule\s+(\w+)/g, m, s = strip(f.code);
+      while ((m = re.exec(s))) {
+        if (!(m[1] in defOf)) defOf[m[1]] = f.name;
+        if (allNames.indexOf(m[1]) < 0) allNames.push(m[1]);
+      }
+    });
+    var instIn = function (code) {
+      var s = strip(code), out = [];
+      allNames.forEach(function (n) {
+        var rx = new RegExp("\\b" + n + "\\b\\s*(?:#\\s*\\([^)]*(?:\\([^)]*\\)[^)]*)*\\))?\\s*\\w+\\s*\\(");
+        if (rx.test(s)) out.push(n);
+      });
+      return out;
+    };
+    var included = {}; included[startName] = codeOf[startName] != null ? codeOf[startName] : startCode;
+    var stack = [startName];
+    while (stack.length) {
+      var fn = stack.pop();
+      instIn(included[fn]).forEach(function (mn) {
+        var df = defOf[mn];
+        if (df && !(df in included)) { included[df] = codeOf[df] || ""; stack.push(df); }
+      });
+    }
+    return Object.keys(included).map(function (fn) { return { name: fn, code: included[fn] }; });
   }
 
   function hideDiagram() {
@@ -3247,10 +3286,10 @@
   });
   // Run the CURRENTLY OPEN testbench against the whole project with the simulator
   // (vvp) and show the real result — for imported / hand-written testbenches.
-  // Run simulation compiles + runs ONLY the currently-open file (self-contained
-  // testbench) with vvp. No cross-project top detection. The button is disabled
-  // (grayed out) unless the current file is a runnable Verilog testbench — see
-  // isRunnableTestbench / updateRunSimButton below.
+  // Run simulation compiles the currently-open file + the files defining every
+  // module it instantiates (transitively) and runs it with vvp — whatever the
+  // current file is. No testbench assumption, no cross-project top detection.
+  // Disabled for non-Verilog files — see collectSimFiles / updateRunSimButton.
   if (runSimBtn) runSimBtn.addEventListener("click", async function () {
     if (moreMenu) moreMenu.classList.add("hidden");
     if (currentProjectId == null) return;
@@ -3259,21 +3298,13 @@
     syncCurrentFileFromEditor();
     var name = fileNameInput.value.trim();
     var code = editor ? editor.getValue() : "";
-    if (!isRunnableTestbench(name, code)) return; // shouldn't happen (button disabled)
-    // Run the current testbench with the DESIGN files it needs — but exclude
-    // synthesized netlists (they redeclare design modules) and OTHER testbenches
-    // (competing tops / duplicate modules). The current file is always included.
-    var isNetlist = function (n) { return /(^|[_.])netlist\.v$/i.test(n) || /_(syn|gate|netlist)\.v$/i.test(n); };
-    var vfiles = files.filter(function (f) {
-      if (!isVerilogName(f.name)) return false;
-      if (f.name === name) return true;            // the testbench being run
-      if (isNetlist(f.name)) return false;         // synthesized netlist → redeclares design
-      var c = f.code || "";
-      if (/\$finish\b/.test(c) || /\$dumpvars\b/.test(c)) return false; // another testbench
-      return true;                                 // a design file the testbench needs
-    }).map(function (f) { return { name: f.name, code: f.code || "" }; });
+    if (!isVerilogName(name)) return; // shouldn't happen (button disabled)
+    // Compile the current file + the files defining every module it instantiates
+    // (transitively). Not tied to "testbench" — runs whatever file is open.
+    var vfiles = collectSimFiles(name, code);
     runSimBtn.disabled = true;
-    consoleLog("▶ simulating " + name + " (vvp)…", "info");
+    var depCount = vfiles.length - 1;
+    consoleLog("▶ simulating " + name + (depCount > 0 ? " + " + depCount + " dependency file(s)" : "") + " (vvp)…", "info");
     try {
       var resp = await fetch(base + "/testbench/run", {
         method: "POST",
@@ -3284,7 +3315,7 @@
       if (data.error) { consoleLog("✗ simulation: " + data.error, "error"); return; }
       var out = String(data.output || "").trim();
       if (data.compileFailed) {
-        consoleLog("✗ simulation: won't compile — check that every module the testbench instantiates exists (and names match) in the design files", "error");
+        consoleLog("✗ simulation: won't compile — check that every module " + name + " instantiates exists in the project (and the names match)", "error");
       } else if (data.passed === true) {
         consoleLog("✓ simulation PASSED ✓", "ok");
       } else if (data.passed === false) {
