@@ -3330,7 +3330,7 @@
         out.split("\n").forEach(function (ln) { consoleLog("   " + ln, "log"); });
         if (data.truncated) {
           var kb = Math.round((data.fullBytes || out.length) / 1024);
-          consoleLog("⚠ output cut off here — the simulation printed " + kb + " KB, more than the display limit. It did NOT freeze; reduce $display volume to see the rest.", "warn");
+          consoleLog("⚠ output cut off here — the simulation printed " + kb + " KB, more than the display limit. Reduce $display volume to see the rest.", "warn");
         }
       }
     } catch (e) {
