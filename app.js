@@ -3260,19 +3260,31 @@
     var name = fileNameInput.value.trim();
     var code = editor ? editor.getValue() : "";
     if (!isRunnableTestbench(name, code)) return; // shouldn't happen (button disabled)
+    // Run the current testbench with the DESIGN files it needs — but exclude
+    // synthesized netlists (they redeclare design modules) and OTHER testbenches
+    // (competing tops / duplicate modules). The current file is always included.
+    var isNetlist = function (n) { return /(^|[_.])netlist\.v$/i.test(n) || /_(syn|gate|netlist)\.v$/i.test(n); };
+    var vfiles = files.filter(function (f) {
+      if (!isVerilogName(f.name)) return false;
+      if (f.name === name) return true;            // the testbench being run
+      if (isNetlist(f.name)) return false;         // synthesized netlist → redeclares design
+      var c = f.code || "";
+      if (/\$finish\b/.test(c) || /\$dumpvars\b/.test(c)) return false; // another testbench
+      return true;                                 // a design file the testbench needs
+    }).map(function (f) { return { name: f.name, code: f.code || "" }; });
     runSimBtn.disabled = true;
     consoleLog("▶ simulating " + name + " (vvp)…", "info");
     try {
       var resp = await fetch(base + "/testbench/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: [{ name: name, code: code }] }),
+        body: JSON.stringify({ files: vfiles }),
       });
       var data = await resp.json();
       if (data.error) { consoleLog("✗ simulation: " + data.error, "error"); return; }
       var out = String(data.output || "").trim();
       if (data.compileFailed) {
-        consoleLog("✗ simulation: " + name + " won't compile (missing modules must be in this file)", "error");
+        consoleLog("✗ simulation: won't compile — check that every module the testbench instantiates exists (and names match) in the design files", "error");
       } else if (data.passed === true) {
         consoleLog("✓ simulation PASSED ✓", "ok");
       } else if (data.passed === false) {
