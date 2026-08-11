@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=18" />
+  <link rel="stylesheet" href="styles.css?v=19" />
 </head>
 <body>
   <header class="topbar">
@@ -91,7 +91,7 @@
             <div class="more-wrap">
               <button id="more-btn" class="btn">More ▾</button>
               <div id="more-menu" class="more-menu hidden">
-                <button id="tb-project" class="btn" title="Test the whole project: import a testbench or let the AI write one">Testbench project</button>
+                <button id="generate-tb" class="btn" title="Let the Verifier write a whole-project testbench (against the spec) into Files and run it">🧪 Generate testbench</button>
                 <button id="view-diagram" class="btn hidden" title="View the dependency diagram">📊 Diagram</button>
                 <button id="use-spec-btn" class="btn btn-spec hidden" title="Use this Markdown file as the design spec">Use as spec</button>
                 <button id="sync-btn" class="btn" title="Save and send all current project files to the AI">Sync current code</button>
@@ -260,19 +260,6 @@
   </div>
 
   <!-- ============ Testbench dialog ============ -->
-  <!-- ============ Testbench whole project dialog ============ -->
-  <div id="tbproj-modal" class="modal-overlay hidden">
-    <div class="modal">
-      <h3>Testbench the whole project</h3>
-      <p class="spec-sub">Provide your own testbench, or let the Verifier write one that checks the top module against the spec. Either way it's saved into Files.</p>
-      <button id="tbproj-import" class="btn">⬆ Import a testbench file</button>
-      <button id="tbproj-ai" class="btn">🤖 Let the Verifier write it</button>
-      <div class="modal-actions">
-        <button id="tbproj-cancel" class="btn btn-small">Cancel</button>
-      </div>
-      <input id="tbproj-input" type="file" accept=".v,.sv" class="hidden" />
-    </div>
-  </div>
 
   <!-- ============ Verifier spec approval dialog ============ -->
   <div id="spec-modal" class="modal-overlay hidden">
@@ -317,7 +304,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=18"></script>
-  <script src="app.js?v=18"></script>
+  <script src="config.js?v=19"></script>
+  <script src="app.js?v=19"></script>
 </body>
 </html>
