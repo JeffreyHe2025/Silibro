@@ -109,15 +109,17 @@ app.post("/testbench/run", async (req, res) => {
 
     const sim = await runTestbench(vfiles); // no tbTop → iverilog auto-picks the root
     if (sim.compileFailed) {
-      return res.json({ passed: null, compileFailed: true, output: (sim.output || "").slice(0, 4000) });
+      return res.json({ passed: null, compileFailed: true, output: (sim.output || "").slice(0, 8000) });
     }
     // Best-effort verdict from common markers (user testbenches vary); FAIL wins
     // over PASS. When nothing clear is printed, leave it null and show raw output.
     const out = sim.output || "";
     let passed = null;
-    if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out)) passed = false;
-    else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out)) passed = true;
-    res.json({ passed, compileFailed: false, output: out.slice(0, 4000) });
+    if (/\b(FAIL(ED)?|MISMATCH|ASSERTION\s+FAILED)\b/i.test(out) || /\berrors?\s*=\s*[1-9]/i.test(out)) passed = false;
+    else if (/\b(PASS(ED)?|SUCCESS|ALL\s+TESTS?\s+PASSED)\b/i.test(out) || /\berrors?\s*=\s*0\b/i.test(out)) passed = true;
+    // Return the full log (bounded generously) — a 200-result scoreboard needs
+    // far more than the old 4 KB, which cut off mid-line around line ~67.
+    res.json({ passed, compileFailed: false, output: out.slice(0, 500000) });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }

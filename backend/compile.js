@@ -202,7 +202,7 @@ function runTestbench(files, tbTop) {
           resolve({ ok: false, compileFailed: true, output: "compile error: " + (cstderr || cstdout || String(cerr)).trim() });
           return;
         }
-        execFile("vvp", [out], { timeout: 20000 }, (rerr, rstdout, rstderr) => {
+        execFile("vvp", [out], { timeout: 20000, maxBuffer: 16 * 1024 * 1024 }, (rerr, rstdout, rstderr) => {
           try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
           const simOut = ((rstdout || "") + (rstderr || "")).trim();
           resolve({ ok: !rerr || simOut.length > 0, compileFailed: false, output: simOut });
