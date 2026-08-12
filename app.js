@@ -3356,6 +3356,8 @@
   var modulesDetail = $("modules-detail");
   var openModulesBtn = $("open-modules");
   var modulesCloseBtn = $("modules-close");
+  var modCodeAce = null;   // the editable Ace instance in the Modules "Verilog code" tab
+  var modCodeFlush = null; // flushes its pending file save (call before teardown)
 
   function moduleRoots(manifest) {
     var depended = {};
@@ -3444,12 +3446,18 @@
     }
     return "";
   }
-  function currentModuleCode(name) {
+  // The project file that actually DEFINES this module (its own name.v, else the
+  // first Verilog file whose text contains `module <name>`). Returns null if none.
+  function fileForModule(name) {
     var f = files.find(function (x) { return x.name === name + ".v" || x.name === name + ".sv"; });
-    if (f) return f.code || "";
+    if (f) return f;
     var re = new RegExp("\\bmodule\\s+" + String(name).replace(/[^\w]/g, "") + "\\b");
-    var g = files.filter(function (x) { return isVerilogName(x.name); }).find(function (x) { return re.test(x.code || ""); });
-    return g ? (g.code || "") : null;
+    return files.filter(function (x) { return isVerilogName(x.name); })
+      .find(function (x) { return re.test(x.code || ""); }) || null;
+  }
+  function currentModuleCode(name) {
+    var f = fileForModule(name);
+    return f ? (f.code || "") : null;
   }
   function isTestbenchStale(m) {
     if (!m || m.fromScan) return false;             // scanned modules have no testbench
@@ -3510,7 +3518,14 @@
     row.addEventListener("click", function () { selectModule(m, row); });
     return li;
   }
+  // Flush any pending code save and tear down the Modules code editor before its
+  // DOM is wiped (switching modules, re-rendering, or closing the browser).
+  function teardownModCode() {
+    if (modCodeFlush) { try { modCodeFlush(); } catch (e) {} modCodeFlush = null; }
+    if (modCodeAce) { try { modCodeAce.destroy(); } catch (e) {} modCodeAce = null; }
+  }
   function selectModule(m, row) {
+    teardownModCode();
     // highlight
     var prev = modulesTree.querySelector(".mod-row.active");
     if (prev) prev.classList.remove("active");
@@ -3533,8 +3548,15 @@
       head.appendChild(warn);
     }
     modulesDetail.appendChild(head);
+    // The "Verilog code" tab is EDITABLE and backed by the real project file that
+    // defines this module — edits here update Files (and vice versa). We read the
+    // module's live slice out of that file so changes made in the main editor show
+    // up here too. If we can't resolve a backing file (e.g. RTL not in the project),
+    // the tab is read-only and shows the captured snapshot.
+    var modFile = fileForModule(m.name);
+    var liveSlice = modFile ? (extractModuleText(modFile.code || "", m.name) || (modFile.code || "")) : (m.code || "(RTL not captured)");
     var tabs = [
-      { key: "code", label: "Verilog code", text: m.code || "(RTL not captured)" },
+      { key: "code", label: "Verilog code" + (modFile ? "" : " (read-only)"), text: liveSlice, editable: !!modFile },
     ];
     var specSection = moduleSpecSection(m.name); // this module's slice of the design spec, if any
     if (specSection) tabs.push({ key: "spec", label: "Spec", text: specSection });
@@ -3544,22 +3566,71 @@
       { key: "summary", label: "Summary", text: m.summary ? JSON.stringify(m.summary, null, 2) : "(no summary)" }
     );
     var tabBar = document.createElement("div"); tabBar.className = "mod-tabs";
-    var pre = document.createElement("pre"); pre.className = "mod-code";
+    var pre = document.createElement("pre"); pre.className = "mod-code";                 // read-only tabs
+    var edEl = document.createElement("div"); edEl.className = "mod-code mod-code-editor hidden"; // editable code tab
+    modulesDetail.appendChild(tabBar);
+    modulesDetail.appendChild(pre);
+    modulesDetail.appendChild(edEl);
+
+    // Editable code tab: Ace, two-way synced to the backing file.
+    modCodeAce = null; modCodeFlush = null;
+    var pendingSave = null;
+    function doSave() { if (modFile) dbUpdateFile(modFile.id, { name: modFile.name, code: modFile.code }); }
+    function scheduleSave() { if (pendingSave) clearTimeout(pendingSave); pendingSave = setTimeout(function () { pendingSave = null; doSave(); }, 500); }
+    modCodeFlush = function () { if (pendingSave) { clearTimeout(pendingSave); pendingSave = null; doSave(); } };
+    function ensureEditor() {
+      if (modCodeAce || !modFile) return modCodeAce;
+      var a = ace.edit(edEl);
+      a.setTheme("ace/theme/monokai");
+      a.session.setMode("ace/mode/verilog");
+      a.setOptions({ fontSize: "13px", showPrintMargin: false, useWorker: false, tabSize: 4 });
+      a.setValue(liveSlice, -1);
+      a.on("change", function () {
+        var newText = a.getValue();
+        var full = modFile.code || "";
+        var oldSlice = extractModuleText(full, m.name);
+        var idx = oldSlice ? full.indexOf(oldSlice) : -1;
+        // Splice the edited module back into its file when it's one of several;
+        // if the module IS the whole file (or couldn't be isolated), replace all.
+        var newFull = (oldSlice && idx >= 0 && oldSlice.trim() !== full.trim())
+          ? full.slice(0, idx) + newText + full.slice(idx + oldSlice.length)
+          : newText;
+        if (newFull === modFile.code) return;
+        modFile.code = newFull;                         // Files (in memory) — vice versa handled on next open
+        if (currentFileId === modFile.id && editor) {   // reflect into the main editor if that file is open
+          var p = editor.getCursorPosition();
+          editor.session.setValue(newFull);
+          editor.moveCursorToPosition(p);
+        }
+        scheduleSave();                                 // debounced DB write
+      });
+      modCodeAce = a;
+      return a;
+    }
+
     function show(t) {
-      pre.textContent = t.text;
       Array.prototype.forEach.call(tabBar.children, function (b) { b.classList.toggle("active", b.getAttribute("data-key") === t.key); });
+      if (t.key === "code" && t.editable) {
+        pre.classList.add("hidden");
+        edEl.classList.remove("hidden");
+        ensureEditor();
+        modCodeAce.resize();
+      } else {
+        edEl.classList.add("hidden");
+        pre.classList.remove("hidden");
+        pre.textContent = t.text;
+      }
     }
     tabs.forEach(function (t) {
       var b = document.createElement("button"); b.className = "btn btn-small mod-tab"; b.setAttribute("data-key", t.key); b.textContent = t.label;
       b.addEventListener("click", function () { show(t); });
       tabBar.appendChild(b);
     });
-    modulesDetail.appendChild(tabBar);
-    modulesDetail.appendChild(pre);
     show(tabs[0]);
   }
   function openModulesView() {
     if (!modulesModal) return;
+    teardownModCode();
     syncCurrentFileFromEditor(); // so unsaved edits to the open module count for staleness
     modulesTree.innerHTML = "";
     // Source priority: this session's build → the persisted module_map.json (from
@@ -3591,7 +3662,7 @@
     modulesModal.classList.remove("hidden");
   }
   if (openModulesBtn) openModulesBtn.addEventListener("click", openModulesView);
-  if (modulesCloseBtn) modulesCloseBtn.addEventListener("click", function () { modulesModal.classList.add("hidden"); });
+  if (modulesCloseBtn) modulesCloseBtn.addEventListener("click", function () { teardownModCode(); modulesModal.classList.add("hidden"); });
   // ---- Synthesize the WHOLE project with yosys (the final step) --------------
   // Run this once the LLMs have finished building and verifying: it takes the
   // assembled design (testbenches excluded automatically), runs the full yosys
