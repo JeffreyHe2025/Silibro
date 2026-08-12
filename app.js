@@ -1877,6 +1877,10 @@
       } else {
         consoleLog("✓ " + ev.module + ": conforms to the spec", "ok");
       }
+    } else if (ev.type === "budgetWarn") {
+      consoleLog("⚠ heads up: verification/correction has passed " + (ev.threshold || 20) +
+        " LLM operations and is continuing — this project is complex or buggy enough to keep needing fixes. " +
+        "It won't stop on its own; watch your API usage.", "warn");
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
     } else if (ev.type === "floor") {

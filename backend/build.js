@@ -596,13 +596,25 @@ function suspectChildren(entry, modByName) {
 // llm = BUILDER (rebuilds broken code). vllm = VERIFIER (writes/runs the oracle
 // via funcTest) — kept separate so the test that judges the code is written by a
 // different model than the one that wrote (and fixes) the code.
+// The verification/fix pass is NOT hard-capped — complex or buggy projects can
+// legitimately need many corrections. We only COUNT operations and warn the user
+// once, when they pass a soft threshold, so a runaway/expensive build is visible.
+// (It's still bounded by maxRounds per module × the module tree, so it can't loop
+// forever.)
+function chargeBudget(budget, onProgress) {
+  budget.used = (budget.used || 0) + 1;
+  if (!budget.warned && budget.used > (budget.warnAt || 20)) {
+    budget.warned = true;
+    if (onProgress) onProgress({ type: "budgetWarn", used: budget.used, threshold: budget.warnAt || 20 });
+  }
+}
+
 async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onProgress, budget, depth) {
   depth = depth || 0;
   const emit = (o) => { if (onProgress) onProgress(Object.assign({ type: "drill", depth: depth }, o)); };
   const maxRounds = 3;
   for (let round = 1; round <= maxRounds; round++) {
-    if (budget.ops <= 0) { emit({ module: entry.name, msg: "correction budget exhausted" }); break; }
-    budget.ops--;
+    chargeBudget(budget, onProgress);
     const res = await funcTest(vllm, spec, entry, builtFiles); // Verifier's oracle
     entry.funcTbPassed = res.passed;
     entry.funcTbOutput = res.details;
@@ -618,8 +630,7 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
     const candidates = suspectChildren(entry, modByName);
     let culprit = null;
     for (const child of candidates) {
-      if (budget.ops <= 0) break;
-      budget.ops--;
+      chargeBudget(budget, onProgress);
       emit({ module: child.name, msg: "testing child of " + entry.name });
       const cres = await funcTest(vllm, spec, child, builtFiles); // Verifier's oracle
       child.funcTbPassed = cres.passed; child.funcTbOutput = cres.details;
@@ -673,7 +684,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
   manifest.forEach((x) => (manifestByName[x.name] = x));
   // Build-wide budget for functional-correction operations (test/fix), so a
   // pathological design can't spawn unbounded LLM calls.
-  const fixBudget = { ops: 20 };
+  const fixBudget = { used: 0, warnAt: 20, warned: false }; // no hard cap; warn past warnAt
 
   const builtFiles = {};
   const results = [];
@@ -693,10 +704,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
       // clock/reset style) AS IT IS BUILT — and any violation is sent straight
       // back to the Builder to fix, instead of only being reported at the end.
       for (let cround = 1; cround <= 2; cround++) {
-        if (fixBudget.ops <= 0) break;
         const conf = await checkConformance(verifierLLM, spec, mod, summary); // Verifier reviews
         if (!conf || conf.conforms) break; // conforms, or inconclusive
-        fixBudget.ops--;
+        chargeBudget(fixBudget, onProgress);
         if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
         const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, conf.issues);
         if (!fixed) break;
