@@ -3439,6 +3439,32 @@
       return { name: mod.name, purpose: "in " + mod.file, dependsOn: deps, code: mod.text, funcTb: "", smokeTb: "", summary: null, fromScan: true };
     });
   }
+  // Staleness: has the module's RTL changed since its testbench/oracle was written?
+  function normalizeVerilog(s) {
+    return String(s || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ").trim();
+  }
+  function extractModuleText(code, name) {
+    var re = new RegExp("\\bmodule\\s+" + String(name).replace(/[^\w]/g, "") + "\\b[\\s\\S]*?\\bendmodule\\b");
+    var m = re.exec(String(code || ""));
+    return m ? m[0] : null;
+  }
+  function currentModuleCode(name) {
+    var f = files.find(function (x) { return x.name === name + ".v" || x.name === name + ".sv"; });
+    if (f) return f.code || "";
+    var re = new RegExp("\\bmodule\\s+" + String(name).replace(/[^\w]/g, "") + "\\b");
+    var g = files.filter(function (x) { return isVerilogName(x.name); }).find(function (x) { return re.test(x.code || ""); });
+    return g ? (g.code || "") : null;
+  }
+  function isTestbenchStale(m) {
+    if (!m || m.fromScan) return false;             // scanned modules have no testbench
+    if (!m.funcTb && !m.smokeTb) return false;       // nothing to be stale
+    if (m.code == null) return false;                // no snapshot to compare against
+    var cur = currentModuleCode(m.name);
+    if (cur == null) return false;                   // current code not found — can't judge
+    var curT = extractModuleText(cur, m.name) || cur;
+    var oldT = extractModuleText(m.code, m.name) || m.code;
+    return normalizeVerilog(curT) !== normalizeVerilog(oldT);
+  }
   function moduleNode(m, byName, ancestors) {
     var li = document.createElement("li");
     li.className = "mod-node";
@@ -3458,6 +3484,13 @@
       badge.className = "mod-badge mod-" + m.verification;
       badge.textContent = m.verification;
       row.appendChild(badge);
+    }
+    if (isTestbenchStale(m)) {
+      var stale = document.createElement("span");
+      stale.className = "mod-badge mod-stale";
+      stale.textContent = "⚠ out of date";
+      stale.title = "This module's RTL has changed since its testbench/oracle was written";
+      row.appendChild(stale);
     }
     li.appendChild(row);
     var childUl = document.createElement("ul");
@@ -3497,6 +3530,12 @@
         (m.complexity != null ? " · complexity " + m.complexity + "/100" : "") +
         (m.purpose ? " · " + m.purpose : "");
     head.appendChild(meta);
+    if (isTestbenchStale(m)) {
+      var warn = document.createElement("div");
+      warn.className = "mod-stale-warn";
+      warn.textContent = "⚠ Out of date — this module's Verilog has changed since its testbench and oracle were written. They no longer match the current code; re-run Verify & Build to regenerate them.";
+      head.appendChild(warn);
+    }
     modulesDetail.appendChild(head);
     var tabs = [
       { key: "code", label: "Verilog code", text: m.code || "(RTL not captured)" },
@@ -3521,6 +3560,7 @@
   }
   function openModulesView() {
     if (!modulesModal) return;
+    syncCurrentFileFromEditor(); // so unsaved edits to the open module count for staleness
     modulesTree.innerHTML = "";
     // Source priority: this session's build → the persisted module_map.json (from
     // a prior build, survives reload) → a fresh scan of the project's .v files.

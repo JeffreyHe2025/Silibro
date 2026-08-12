@@ -1409,3 +1409,8 @@ body.console-resizing, body.console-resizing * {
 
 /* Modules browser close button: black text, not gray */
 #modules-close { color: #111 !important; }
+
+/* Modules browser: out-of-date testbench flag */
+.mod-stale { background: #fde2e1; color: #b42318; }
+.mod-stale-warn { background: #fff4e5; color: #92400e; border: 1px solid #f6c177;
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; margin: 6px 0 8px; }
