@@ -474,6 +474,7 @@ async function funcTest(vllm, spec, entry, builtFiles) {
   const mod = { name: entry.name, purpose: entry.purpose };
   let ftb = await genFunctionalTestbench(vllm, mod, spec, entry.summary || {});
   if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated", tbBroken: true };
+  entry.funcTb = ftb.code; // keep the LLM-written oracle testbench for the Modules view
 
   const maxTbTries = 3;
   for (let tbTry = 1; tbTry <= maxTbTries; tbTry++) {
@@ -495,6 +496,7 @@ async function funcTest(vllm, spec, entry, builtFiles) {
           return { passed: null, details: "testbench won't compile and repair failed: " + sim.output.slice(0, 160), tbBroken: true };
         }
         ftb = repaired;
+        entry.funcTb = ftb.code;
         continue;
       }
       return { passed: null, details: "oracle testbench won't compile after " + maxTbTries + " tries: " + sim.output.slice(0, 160), tbBroken: true };
@@ -530,12 +532,13 @@ async function runSmokeBaseline(code, floorFiles) {
       return {
         passed: where === "module" ? false : null,
         markers: "smoke tb " + (where === "module" ? "module error: " : "couldn't compile: ") + sim.output.slice(0, 160),
+        tb: stb.code,
       };
     }
     const markers = (sim.output.match(/SMOKE_[A-Z]+[^\n]*/g) || []).join("; ").slice(0, 400);
-    if (/SMOKE_PASS/.test(sim.output)) return { passed: true, markers: markers };
-    if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) return { passed: false, markers: markers };
-    return { passed: null, markers: markers || (sim.ok ? "no verdict" : "sim error") };
+    if (/SMOKE_PASS/.test(sim.output)) return { passed: true, markers: markers, tb: stb.code };
+    if (/SMOKE_FAIL|SMOKE_X/.test(sim.output)) return { passed: false, markers: markers, tb: stb.code };
+    return { passed: null, markers: markers || (sim.ok ? "no verdict" : "sim error"), tb: stb.code };
   } catch (e) {
     return { passed: null, markers: String((e && e.message) || e) };
   }
@@ -801,6 +804,8 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
         const smoke = await runSmokeBaseline(r.code, floorFiles);
         entry.smokeSimPassed = smoke.passed;
         entry.smokeSimOutput = smoke.markers;
+        entry.smokeTb = smoke.tb || "";  // code-generated smoke testbench (for the Modules view)
+        entry.code = r.code;             // the module's Verilog RTL (for the Modules view)
         const smokeOk = smoke.passed !== false; // fail only on a real X/module failure
 
         if (stopTests) {

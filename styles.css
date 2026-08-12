@@ -1380,3 +1380,29 @@ body.console-resizing, body.console-resizing * {
 .line-error { color: #f87171; }
 .line-warn { color: #fbbf24; }
 .line-info { color: #93c5fd; }
+
+/* ============ Modules browser ============ */
+.modules-modal-box { width: min(1000px, 94vw); max-width: 94vw; text-align: left; }
+.modules-head { display: flex; align-items: center; justify-content: space-between; }
+.modules-body { display: flex; gap: 12px; height: 70vh; margin-top: 10px; }
+.modules-tree { flex: 0 0 300px; overflow: auto; list-style: none; margin: 0; padding: 6px;
+  border: 1px solid var(--border, #e2e4e8); border-radius: 8px; background: var(--panel, #fafbfc); }
+.modules-detail { flex: 1 1 auto; overflow: auto; border: 1px solid var(--border, #e2e4e8);
+  border-radius: 8px; padding: 10px; display: flex; flex-direction: column; min-width: 0; }
+.mod-node { list-style: none; }
+.mod-children { list-style: none; margin: 0; padding-left: 16px; }
+.mod-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.mod-row:hover { background: rgba(120,140,170,0.12); }
+.mod-row.active { background: rgba(80,120,220,0.18); }
+.mod-exp { width: 14px; text-align: center; color: #8a93a3; user-select: none; }
+.mod-name { flex: 1 1 auto; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; text-transform: uppercase; letter-spacing: .3px; }
+.mod-functional { background: #d8f5df; color: #1a7f37; }
+.mod-smoke { background: #fff3cd; color: #8a6d00; }
+.mod-unverified { background: #eceef1; color: #6b7280; }
+.mod-detail-head h4 { margin: 0 0 2px; }
+.mod-detail-meta { font-size: 12px; color: #6b7280; margin-bottom: 8px; }
+.mod-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.mod-tab.active { background: #2f6feb; color: #fff; }
+.mod-code { flex: 1 1 auto; overflow: auto; margin: 0; padding: 10px; border-radius: 8px;
+  background: #0f1420; color: #d6deeb; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; }

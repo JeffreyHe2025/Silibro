@@ -3390,6 +3390,116 @@
   if (budgetContinueBtn) budgetContinueBtn.addEventListener("click", function () { sendBudgetDecision("continue"); });
   if (budgetBuildOnlyBtn) budgetBuildOnlyBtn.addEventListener("click", function () { sendBudgetDecision("buildOnly"); });
   if (budgetRaiseBtn) budgetRaiseBtn.addEventListener("click", function () { sendBudgetDecision("raiseCutoff"); });
+
+  // ---- Modules browser: dependency tree + per-module code/testbench/oracle ----
+  var modulesModal = $("modules-modal");
+  var modulesTree = $("modules-tree");
+  var modulesDetail = $("modules-detail");
+  var openModulesBtn = $("open-modules");
+  var modulesCloseBtn = $("modules-close");
+
+  function moduleRoots(manifest) {
+    var depended = {};
+    manifest.forEach(function (x) { (x.dependsOn || []).forEach(function (d) { depended[d] = true; }); });
+    return manifest.filter(function (x) { return !depended[x.name]; });
+  }
+  function moduleNode(m, byName, ancestors) {
+    var li = document.createElement("li");
+    li.className = "mod-node";
+    var row = document.createElement("div");
+    row.className = "mod-row";
+    var kids = (m.dependsOn || []).filter(function (d) { return byName[d]; });
+    var exp = document.createElement("span");
+    exp.className = "mod-exp";
+    exp.textContent = kids.length ? "▸" : "·"; // the "+" that reveals child modules
+    row.appendChild(exp);
+    var name = document.createElement("span");
+    name.className = "mod-name";
+    name.textContent = m.name;
+    row.appendChild(name);
+    var badge = document.createElement("span");
+    badge.className = "mod-badge mod-" + (m.verification || "unverified");
+    badge.textContent = m.verification || "unverified";
+    row.appendChild(badge);
+    li.appendChild(row);
+    var childUl = document.createElement("ul");
+    childUl.className = "mod-children hidden";
+    li.appendChild(childUl);
+    var expanded = false;
+    function toggle() {
+      if (!kids.length) return;
+      expanded = !expanded;
+      exp.textContent = expanded ? "▾" : "▸";
+      childUl.classList.toggle("hidden", !expanded);
+      if (expanded && !childUl.childElementCount) {
+        kids.forEach(function (d) {
+          if (ancestors[d]) return; // cycle guard
+          var childAnc = Object.assign({}, ancestors); childAnc[m.name] = true;
+          childUl.appendChild(moduleNode(byName[d], byName, childAnc));
+        });
+      }
+    }
+    exp.addEventListener("click", function (e) { e.stopPropagation(); toggle(); });
+    row.addEventListener("click", function () { selectModule(m, row); });
+    return li;
+  }
+  function selectModule(m, row) {
+    // highlight
+    var prev = modulesTree.querySelector(".mod-row.active");
+    if (prev) prev.classList.remove("active");
+    if (row) row.classList.add("active");
+    modulesDetail.innerHTML = "";
+    var head = document.createElement("div");
+    head.className = "mod-detail-head";
+    var h = document.createElement("h4"); h.textContent = m.name; head.appendChild(h);
+    var meta = document.createElement("div"); meta.className = "mod-detail-meta";
+    meta.textContent = (m.tier ? m.tier + " tier · " : "") + (m.verification || "unverified") +
+      (m.complexity != null ? " · complexity " + m.complexity + "/100" : "") +
+      (m.purpose ? " · " + m.purpose : "");
+    head.appendChild(meta);
+    modulesDetail.appendChild(head);
+    var tabs = [
+      { key: "code", label: "Verilog code", text: m.code || "(RTL not captured)" },
+      { key: "func", label: "Testbench (LLM oracle)", text: m.funcTb || "(no functional oracle — this module is smoke-tier or wasn't functionally tested)" },
+      { key: "smoke", label: "Smoke test", text: m.smokeTb || "(no smoke test)" },
+      { key: "summary", label: "Summary", text: m.summary ? JSON.stringify(m.summary, null, 2) : "(no summary)" },
+    ];
+    var tabBar = document.createElement("div"); tabBar.className = "mod-tabs";
+    var pre = document.createElement("pre"); pre.className = "mod-code";
+    function show(t) {
+      pre.textContent = t.text;
+      Array.prototype.forEach.call(tabBar.children, function (b) { b.classList.toggle("active", b.getAttribute("data-key") === t.key); });
+    }
+    tabs.forEach(function (t) {
+      var b = document.createElement("button"); b.className = "btn btn-small mod-tab"; b.setAttribute("data-key", t.key); b.textContent = t.label;
+      b.addEventListener("click", function () { show(t); });
+      tabBar.appendChild(b);
+    });
+    modulesDetail.appendChild(tabBar);
+    modulesDetail.appendChild(pre);
+    show(tabs[0]);
+  }
+  function openModulesView() {
+    if (!modulesModal) return;
+    modulesTree.innerHTML = "";
+    var manifest = (lastFlowData && lastFlowData.manifest) || [];
+    if (!manifest.length) {
+      var li = document.createElement("li");
+      li.className = "empty-note";
+      li.textContent = "No modules yet — run Verify & Build to generate a design, then reopen this.";
+      modulesTree.appendChild(li);
+    } else {
+      var byName = {};
+      manifest.forEach(function (x) { byName[x.name] = x; });
+      moduleRoots(manifest).forEach(function (m) { modulesTree.appendChild(moduleNode(m, byName, {})); });
+    }
+    modulesDetail.innerHTML = "";
+    var p = document.createElement("p"); p.className = "empty-note"; p.textContent = "Select a module to see its Verilog, testbench, and oracle. Click ▸ to reveal a module's child modules.";
+    modulesDetail.appendChild(p);
+    modulesModal.classList.remove("hidden");
+  }
+  if (openModulesBtn) openModulesBtn.addEventListener("click", openModulesView);
+  if (modulesCloseBtn) modulesCloseBtn.addEventListener("click", function () { modulesModal.classList.add("hidden"); });
   // ---- Synthesize the WHOLE project with yosys (the final step) --------------
   // Run this once the LLMs have finished building and verifying: it takes the
   // assembled design (testbenches excluded automatically), runs the full yosys
