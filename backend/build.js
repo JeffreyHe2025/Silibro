@@ -49,7 +49,9 @@ function topoSort(modules) {
 async function planGraph(llm, spec) {
   const sys =
     "You are a Verilog design planner. Decompose the request into synthesizable modules. " +
-    'Return ONLY JSON in this shape, no prose: ' +
+    "If the request is NOT a digital-hardware / Verilog design (e.g. software, scripts, essays, " +
+    'general questions), return exactly {"modules":[]} and nothing else. ' +
+    'Otherwise return ONLY JSON in this shape, no prose: ' +
     '{"modules":[{"name":"<verilog_module_name>","purpose":"<one line>","dependsOn":["<names of modules in this list it directly instantiates>"]}]} ' +
     "Leaf modules have an empty dependsOn. Do NOT include testbenches.";
   const reply = await callLLM({

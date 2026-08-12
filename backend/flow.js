@@ -62,16 +62,25 @@ async function getGraph() {
     manifest: Annotation(),
     dependencyGraph: Annotation(),
     review: Annotation(),
+    offTopic: Annotation(),
+    redirect: Annotation(),
   });
 
   // The Verifier writes (or rewrites) the spec.
   async function verifier(state) {
     const sys =
-      "You are the Verifier in a hardware design pipeline. Turn the user's request " +
-      "into a clear, complete, unambiguous design specification for a Verilog design. " +
-      "Cover: overview, module list with one-line purposes, I/O ports (name, direction, " +
-      "width), behavior, and any parameters or edge cases. Write it in Markdown. " +
-      "Output ONLY the specification — no preamble, no code.";
+      "You are the Verifier in a DIGITAL HARDWARE design pipeline. You ONLY handle digital hardware " +
+      "designs implementable in Verilog/SystemVerilog (RTL modules, FSMs, datapaths, arithmetic units, " +
+      "memories, bus/interface logic, testbenches, and the like).\n" +
+      "SCOPE GUARD: If the user's request is NOT a digital-hardware / Verilog design task — e.g. software " +
+      "apps, web/mobile code, scripts, essays, general questions, math homework, images, or anything not " +
+      "synthesizable to hardware — do NOT write a specification and do NOT attempt it. Instead output " +
+      "EXACTLY one line: 'NOT_HARDWARE: ' followed by one friendly sentence redirecting them to describe a " +
+      "digital hardware / Verilog design. Output nothing else in that case.\n" +
+      "Otherwise, turn the request into a clear, complete, unambiguous design specification for a Verilog " +
+      "design. Cover: overview, module list with one-line purposes, I/O ports (name, direction, width), " +
+      "behavior, and any parameters or edge cases. Write it in Markdown. Output ONLY the specification — " +
+      "no preamble, no code.";
     let user = "User request:\n" + state.prompt;
     if (state.feedback) {
       user +=
@@ -86,7 +95,17 @@ async function getGraph() {
       system: sys,
       messages: [{ role: "user", content: user, images: state.images || [] }],
     });
-    return { spec: (spec || "").trim(), approved: false };
+    const text = (spec || "").trim();
+    const m = /^NOT_HARDWARE:\s*(.*)$/i.exec(text.split("\n")[0] || "");
+    if (m) {
+      return {
+        offTopic: true,
+        redirect: (m[1] || "").trim() || "This tool only designs digital hardware in Verilog. Please describe a hardware / Verilog design and I'll build it.",
+        spec: "",
+        approved: false,
+      };
+    }
+    return { spec: text, approved: false, offTopic: false };
   }
 
   // Human-in-the-loop gate: pause and surface the spec for approval.
@@ -173,6 +192,10 @@ async function getGraph() {
   function route(state) {
     return state.approved ? "builder" : "verifier";
   }
+  // After the Verifier: off-topic requests end here (redirect), never reaching the build.
+  function routeAfterVerify(state) {
+    return state.offTopic ? "end" : "approval";
+  }
 
   _graph = new StateGraph(S)
     .addNode("verifier", verifier)
@@ -180,7 +203,7 @@ async function getGraph() {
     .addNode("builder", builder)
     .addNode("verifierReview", verifierReview)
     .addEdge(START, "verifier")
-    .addEdge("verifier", "approval")
+    .addConditionalEdges("verifier", routeAfterVerify, { approval: "approval", end: END })
     .addConditionalEdges("approval", route, { verifier: "verifier", builder: "builder" })
     .addEdge("builder", "verifierReview")
     .addEdge("verifierReview", END)
@@ -195,6 +218,9 @@ function summarize(result) {
   if (interrupts && interrupts.length) {
     const val = interrupts[0].value || interrupts[0];
     return { done: false, spec: (val && val.spec) || "" };
+  }
+  if (result && result.offTopic) {
+    return { done: true, offTopic: true, redirect: result.redirect || "This tool only builds digital hardware in Verilog." };
   }
   return {
     done: true,

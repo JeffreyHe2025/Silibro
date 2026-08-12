@@ -1790,6 +1790,13 @@
         bubble.classList.add("chat-error");
         return;
       }
+      if (data.offTopic) {
+        // Scope guard: not a hardware/Verilog request — redirect, don't build.
+        bubble.textContent = "🛠 " + (data.redirect ||
+          "This tool only designs digital hardware in Verilog. Please describe a hardware / Verilog design and I'll build it.");
+        flowThreadId = null;
+        return;
+      }
       flowThreadId = data.threadId;
       bubble.textContent = "🧭 Verifier wrote a spec — please review it.";
       showSpecModal(data.spec);
@@ -2998,6 +3005,7 @@
     syncCurrentFileFromEditor(); // include unsaved edits of the open file
     var lines = [
       "You are an AI assistant embedded in a Verilog IDE. You can read and edit the files of the user's currently selected project.",
+      "SCOPE: You ONLY help with DIGITAL HARDWARE design in Verilog/SystemVerilog (RTL modules, FSMs, datapaths, arithmetic, memories, interfaces, testbenches, synthesis). If the user asks you to build or write anything that is NOT digital hardware — software apps, web/mobile code, scripts, essays, general questions, math homework, images, etc. — do NOT build it and do NOT create/edit any non-hardware files. Politely decline in one or two sentences and redirect them to describe a hardware / Verilog design instead.",
       "",
       "PROJECT: " + (projectNameInput.value.trim() || "Untitled"),
       "FILES:",
