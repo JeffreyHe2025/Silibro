@@ -604,9 +604,11 @@ function suspectChildren(entry, modByName) {
 // bounded by maxRounds per module × the module tree, so it can't loop forever.
 function chargeBudget(budget) {
   budget.used = (budget.used || 0) + 1;
-  if (!budget.crossed && budget.used > (budget.warnAt || 20)) {
-    budget.crossed = true;
+  const step = budget.warnAt || 20;
+  const nextAt = budget.nextAt || step;
+  if (budget.used > nextAt) {
     budget.needsDecision = true;
+    budget.nextAt = nextAt + step; // re-ask at every further multiple of the threshold
   }
 }
 
@@ -689,7 +691,10 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   manifest.forEach((x) => (manifestByName[x.name] = x));
   // Build-wide budget for functional-correction operations (test/fix), so a
   // pathological design can't spawn unbounded LLM calls.
-  const fixBudget = { used: 0, warnAt: 20, crossed: false, needsDecision: false };
+  // Fresh per build — a new /flow run (e.g. re-prompt with modifications) always
+  // starts buildDesign again, so the counter resets on its own. Re-asks at each
+  // multiple of warnAt (20, 40, 60, …).
+  const fixBudget = { used: 0, warnAt: 20, nextAt: 20, needsDecision: false };
   // Mutable verification policy — a mid-build decision (or the plain warn path)
   // can change these for the REMAINING modules.
   let stopTests = false;   // "buildOnly": skip LLM verification (conformance + oracle)
@@ -707,7 +712,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
         let choice = "continue";
         try { choice = await decide({ used: fixBudget.used }); } catch (_) {}
         if (choice === "buildOnly") { stopTests = true; if (onProgress) onProgress({ type: "budgetDecided", choice: "buildOnly" }); }
-        else if (choice === "raiseCutoff") { cutoff = 50; if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
+        else if (choice === "raiseCutoff") { cutoff = Math.min(95, cutoff + 28); if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
         else if (onProgress) onProgress({ type: "budgetDecided", choice: "continue" });
       } else if (onProgress) {
         onProgress({ type: "budgetWarn", used: fixBudget.used, threshold: fixBudget.warnAt });

@@ -240,6 +240,7 @@ async function resumeFlow(threadId, decision, onProgress) {
     return summarize(result);
   } finally {
     progressListeners.delete(threadId);
+    pendingDecisions.delete(threadId); // in case the build ended while awaiting a decision
   }
 }
 
