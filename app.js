@@ -1883,7 +1883,7 @@
         "It won't stop on its own; watch your API usage.", "warn");
     } else if (ev.type === "budgetDecision") {
       consoleLog("⚠ verification has used " + (ev.used || 20) + " LLM operations — choose how to proceed…", "warn");
-      showBudgetDecision(ev.used);
+      showBudgetDecision(ev.used, ev.allowRaise !== false);
     } else if (ev.type === "budgetDecided") {
       var msg = ev.choice === "buildOnly" ? "no more module tests — building the rest without verification"
         : ev.choice === "raiseCutoff" ? "raised the complexity cutoff to " + (ev.cutoff || 50) + " — fewer modules get functional testing"
@@ -3365,11 +3365,15 @@
       body: JSON.stringify({ threadId: flowThreadId, choice: choice }),
     }).catch(function () {});
   }
-  function showBudgetDecision(used) {
+  function showBudgetDecision(used, allowRaise) {
     var modal = $("budget-modal");
     if (!modal) { sendBudgetDecision("continue"); return; } // no UI → default
     var usedEl = $("budget-used");
     if (usedEl) usedEl.textContent = String(used || 20);
+    // Only offer the reduce-LLM-call options not already taken (raise cutoff is
+    // one-shot; once used it's hidden on later asks).
+    var raiseBtn = $("budget-raise");
+    if (raiseBtn) raiseBtn.classList.toggle("hidden", allowRaise === false);
     modal.classList.remove("hidden");
   }
   var budgetContinueBtn = $("budget-continue");

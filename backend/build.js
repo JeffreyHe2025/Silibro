@@ -698,6 +698,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   // Mutable verification policy — a mid-build decision (or the plain warn path)
   // can change these for the REMAINING modules.
   let stopTests = false;   // "buildOnly": skip LLM verification (conformance + oracle)
+  let raisedCutoff = false; // whether the user already chose "raiseCutoff"
   let cutoff = FLOOR_CUTOFF; // "raiseCutoff": bump so fewer modules hit the functional tier
 
   const builtFiles = {};
@@ -706,13 +707,14 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   for (const mod of order) {
     // Verification passed the soft threshold last iteration → resolve the policy
     // before doing any more verification. Interactive flow asks; else just warn.
+    // Re-ask only offers the reduce-LLM-call options not already taken.
     if (fixBudget.needsDecision) {
       fixBudget.needsDecision = false;
       if (decide) {
         let choice = "continue";
-        try { choice = await decide({ used: fixBudget.used }); } catch (_) {}
+        try { choice = await decide({ used: fixBudget.used, allowRaise: !raisedCutoff }); } catch (_) {}
         if (choice === "buildOnly") { stopTests = true; if (onProgress) onProgress({ type: "budgetDecided", choice: "buildOnly" }); }
-        else if (choice === "raiseCutoff") { cutoff = Math.min(95, cutoff + 28); if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
+        else if (choice === "raiseCutoff" && !raisedCutoff) { raisedCutoff = true; cutoff = 50; if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
         else if (onProgress) onProgress({ type: "budgetDecided", choice: "continue" });
       } else if (onProgress) {
         onProgress({ type: "budgetWarn", used: fixBudget.used, threshold: fixBudget.warnAt });

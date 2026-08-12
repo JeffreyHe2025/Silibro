@@ -111,7 +111,7 @@ async function getGraph() {
       let done = false;
       const finish = (choice) => { if (done) return; done = true; pendingDecisions.delete(state.threadId); resolve(choice); };
       pendingDecisions.set(state.threadId, finish);
-      if (emit) emit({ type: "budgetDecision", used: info.used });
+      if (emit) emit({ type: "budgetDecision", used: info.used, allowRaise: info.allowRaise !== false });
       setTimeout(() => finish("continue"), 300000); // 5-min fallback
     });
     const out = await buildDesign(
