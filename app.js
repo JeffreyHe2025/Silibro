@@ -3403,6 +3403,30 @@
     manifest.forEach(function (x) { (x.dependsOn || []).forEach(function (d) { depended[d] = true; }); });
     return manifest.filter(function (x) { return !depended[x.name]; });
   }
+  // Build a module map by SCANNING the project's Verilog files (no build needed):
+  // parse each `module … endmodule`, and dependsOn = the modules it instantiates.
+  // Code is the module's own text; testbench/oracle/summary come only from a build.
+  function scanModulesFromFiles() {
+    var strip = function (s) { return String(s || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, ""); };
+    var mods = [], allNames = [];
+    files.filter(function (f) { return isVerilogName(f.name); }).forEach(function (f) {
+      var code = f.code || "";
+      var re = /\bmodule\s+(\w+)\b[\s\S]*?\bendmodule\b/g, m;
+      while ((m = re.exec(code))) {
+        mods.push({ name: m[1], text: m[0], stripped: strip(m[0]), file: f.name });
+        if (allNames.indexOf(m[1]) < 0) allNames.push(m[1]);
+      }
+    });
+    return mods.map(function (mod) {
+      var deps = [];
+      allNames.forEach(function (n) {
+        if (n === mod.name) return;
+        var rx = new RegExp("\\b" + n + "\\b\\s*(?:#\\s*\\([^)]*(?:\\([^)]*\\)[^)]*)*\\))?\\s*\\w+\\s*\\(");
+        if (rx.test(mod.stripped) && deps.indexOf(n) < 0) deps.push(n);
+      });
+      return { name: mod.name, purpose: "in " + mod.file, dependsOn: deps, code: mod.text, funcTb: "", smokeTb: "", summary: null, fromScan: true };
+    });
+  }
   function moduleNode(m, byName, ancestors) {
     var li = document.createElement("li");
     li.className = "mod-node";
@@ -3417,10 +3441,12 @@
     name.className = "mod-name";
     name.textContent = m.name;
     row.appendChild(name);
-    var badge = document.createElement("span");
-    badge.className = "mod-badge mod-" + (m.verification || "unverified");
-    badge.textContent = m.verification || "unverified";
-    row.appendChild(badge);
+    if (m.verification) { // only from a build; scanned modules have no status
+      var badge = document.createElement("span");
+      badge.className = "mod-badge mod-" + m.verification;
+      badge.textContent = m.verification;
+      row.appendChild(badge);
+    }
     li.appendChild(row);
     var childUl = document.createElement("ul");
     childUl.className = "mod-children hidden";
@@ -3453,9 +3479,11 @@
     head.className = "mod-detail-head";
     var h = document.createElement("h4"); h.textContent = m.name; head.appendChild(h);
     var meta = document.createElement("div"); meta.className = "mod-detail-meta";
-    meta.textContent = (m.tier ? m.tier + " tier · " : "") + (m.verification || "unverified") +
-      (m.complexity != null ? " · complexity " + m.complexity + "/100" : "") +
-      (m.purpose ? " · " + m.purpose : "");
+    meta.textContent = m.fromScan
+      ? "scanned from project files" + (m.purpose ? " (" + m.purpose + ")" : "") + " — run Verify & Build for tier / verification / testbenches"
+      : (m.tier ? m.tier + " tier · " : "") + (m.verification || "unverified") +
+        (m.complexity != null ? " · complexity " + m.complexity + "/100" : "") +
+        (m.purpose ? " · " + m.purpose : "");
     head.appendChild(meta);
     modulesDetail.appendChild(head);
     var tabs = [
@@ -3482,11 +3510,15 @@
   function openModulesView() {
     if (!modulesModal) return;
     modulesTree.innerHTML = "";
-    var manifest = (lastFlowData && lastFlowData.manifest) || [];
+    // Prefer the rich build manifest (has testbenches/oracle/verification); if no
+    // build ran this session, scan the project's Verilog files instead.
+    var built = (lastFlowData && lastFlowData.manifest) || [];
+    var manifest = built.length ? built : scanModulesFromFiles();
+    var scanned = !built.length;
     if (!manifest.length) {
       var li = document.createElement("li");
       li.className = "empty-note";
-      li.textContent = "No modules yet — run Verify & Build to generate a design, then reopen this.";
+      li.textContent = "No Verilog modules found. Add .v files or run Verify & Build.";
       modulesTree.appendChild(li);
     } else {
       var byName = {};
@@ -3494,7 +3526,10 @@
       moduleRoots(manifest).forEach(function (m) { modulesTree.appendChild(moduleNode(m, byName, {})); });
     }
     modulesDetail.innerHTML = "";
-    var p = document.createElement("p"); p.className = "empty-note"; p.textContent = "Select a module to see its Verilog, testbench, and oracle. Click ▸ to reveal a module's child modules.";
+    var p = document.createElement("p"); p.className = "empty-note";
+    p.textContent = scanned
+      ? "Scanned from your project files. Select a module to see its Verilog; click ▸ to reveal child modules. (Run Verify & Build to also see testbenches, oracle, and verification status.)"
+      : "Select a module to see its Verilog, testbench, and oracle. Click ▸ to reveal a module's child modules.";
     modulesDetail.appendChild(p);
     modulesModal.classList.remove("hidden");
   }
