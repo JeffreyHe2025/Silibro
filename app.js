@@ -724,7 +724,8 @@
     filesEmpty.classList.toggle("hidden", files.length > 0);
     var topId = resolveTop();
     // Show the declared top file first, then the rest alphabetically.
-    var ordered = files.slice().sort(function (a, b) {
+    // module_map.json is derived metadata for the 🧩 Modules view — keep it out of the list.
+    var ordered = files.filter(function (f) { return f.name !== "module_map.json"; }).sort(function (a, b) {
       if (a.id === topId) return -1;
       if (b.id === topId) return 1;
       return (a.name || "").localeCompare(b.name || "");
@@ -2053,6 +2054,17 @@
     if (data.dependencyGraph) {
       edits.push({ name: "dependency_graph.md", content: data.dependencyGraph });
     }
+    // Persist the module map (tree + code + LLM testbench/oracle + summary) so the
+    // 🧩 Modules view survives a reload. Hidden from the Files list.
+    var modMap = (data.manifest || []).map(function (m) {
+      return {
+        name: m.name, purpose: m.purpose, dependsOn: m.dependsOn, tier: m.tier,
+        verification: m.verification, complexity: m.complexity, summary: m.summary,
+        funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code,
+        funcTbPassed: m.funcTbPassed, smokeSimPassed: m.smokeSimPassed,
+      };
+    });
+    if (modMap.length) edits.push({ name: "module_map.json", content: JSON.stringify(modMap) });
     Object.keys(filesObj).forEach(function (n) {
       edits.push({ name: /\.s?v$/i.test(n) ? n : n + ".v", content: filesObj[n] });
     });
@@ -3510,11 +3522,16 @@
   function openModulesView() {
     if (!modulesModal) return;
     modulesTree.innerHTML = "";
-    // Prefer the rich build manifest (has testbenches/oracle/verification); if no
-    // build ran this session, scan the project's Verilog files instead.
+    // Source priority: this session's build → the persisted module_map.json (from
+    // a prior build, survives reload) → a fresh scan of the project's .v files.
     var built = (lastFlowData && lastFlowData.manifest) || [];
-    var manifest = built.length ? built : scanModulesFromFiles();
-    var scanned = !built.length;
+    var manifest = built;
+    if (!manifest.length) {
+      var mapFile = files.find(function (f) { return f.name === "module_map.json"; });
+      if (mapFile) { try { manifest = JSON.parse(mapFile.code || "[]") || []; } catch (e) { manifest = []; } }
+    }
+    var scanned = false;
+    if (!manifest.length) { manifest = scanModulesFromFiles(); scanned = true; }
     if (!manifest.length) {
       var li = document.createElement("li");
       li.className = "empty-note";
