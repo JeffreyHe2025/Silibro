@@ -3441,7 +3441,9 @@
   }
   // Staleness: has the module's RTL changed since its testbench/oracle was written?
   function normalizeVerilog(s) {
-    return String(s || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ").trim();
+    // Strip comments and ALL whitespace so pure reformatting/comment edits don't
+    // read as a change — only real code edits differ.
+    return String(s || "").replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, "");
   }
   function extractModuleText(code, name) {
     var re = new RegExp("\\bmodule\\s+" + String(name).replace(/[^\w]/g, "") + "\\b[\\s\\S]*?\\bendmodule\\b");
