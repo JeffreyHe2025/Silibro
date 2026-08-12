@@ -3397,6 +3397,53 @@
     var m = re.exec(String(code || ""));
     return m ? m[0] : null;
   }
+  // The whole-design spec the Verifier wrote (a saved spec.md, else this session's).
+  function designSpecText() {
+    var sf = files.find(function (f) { return /^spec\.md$/i.test(f.name); });
+    return (sf && sf.code) || lastFlowSpec || "";
+  }
+  // Pull just THIS module's portion out of the design spec, if the spec is broken
+  // up per module (a heading naming it, or a list/definition line naming it).
+  // Returns "" when there's no spec or no section for this module.
+  function moduleSpecSection(name) {
+    var spec = designSpecText();
+    if (!spec || !name) return "";
+    var esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var nameRe = new RegExp("\\b" + esc + "\\b");
+    var lines = spec.split("\n");
+    // 1) A heading whose text names the module → capture down to the next
+    //    heading at the same or higher level.
+    for (var i = 0; i < lines.length; i++) {
+      var hm = /^(#{1,6})\s+(.*)$/.exec(lines[i]);
+      if (hm && nameRe.test(hm[2])) {
+        var level = hm[1].length;
+        var out = [lines[i]];
+        for (var j = i + 1; j < lines.length; j++) {
+          var nh = /^(#{1,6})\s+/.exec(lines[j]);
+          if (nh && nh[1].length <= level) break;
+          out.push(lines[j]);
+        }
+        return out.join("\n").trim();
+      }
+    }
+    // 2) A list / definition line naming the module → that line plus any lines
+    //    indented under it (its ports/behavior bullets).
+    for (var k = 0; k < lines.length; k++) {
+      var lm = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/.exec(lines[k]);
+      if (lm && nameRe.test(lm[2])) {
+        var baseIndent = lm[1].length;
+        var block = [lines[k]];
+        for (var n = k + 1; n < lines.length; n++) {
+          if (/^\s*$/.test(lines[n])) break;
+          var ind = (lines[n].match(/^\s*/) || [""])[0].length;
+          if (ind > baseIndent) { block.push(lines[n]); continue; }
+          break;
+        }
+        return block.join("\n").trim();
+      }
+    }
+    return "";
+  }
   function currentModuleCode(name) {
     var f = files.find(function (x) { return x.name === name + ".v" || x.name === name + ".sv"; });
     if (f) return f.code || "";
@@ -3488,10 +3535,14 @@
     modulesDetail.appendChild(head);
     var tabs = [
       { key: "code", label: "Verilog code", text: m.code || "(RTL not captured)" },
+    ];
+    var specSection = moduleSpecSection(m.name); // this module's slice of the design spec, if any
+    if (specSection) tabs.push({ key: "spec", label: "Spec", text: specSection });
+    tabs.push(
       { key: "func", label: "Testbench (LLM oracle)", text: m.funcTb || "(no functional oracle — this module is smoke-tier or wasn't functionally tested)" },
       { key: "smoke", label: "Smoke test", text: m.smokeTb || "(no smoke test)" },
-      { key: "summary", label: "Summary", text: m.summary ? JSON.stringify(m.summary, null, 2) : "(no summary)" },
-    ];
+      { key: "summary", label: "Summary", text: m.summary ? JSON.stringify(m.summary, null, 2) : "(no summary)" }
+    );
     var tabBar = document.createElement("div"); tabBar.className = "mod-tabs";
     var pre = document.createElement("pre"); pre.className = "mod-code";
     function show(t) {
