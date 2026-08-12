@@ -590,8 +590,8 @@ function suspectChildren(entry, modByName) {
 // Fault localization + ONE-BUG-AT-A-TIME correction. On a functional failure:
 // test the not-yet-verified direct children (suspicion-ordered, STOP at the first
 // that fails); a failing child → recurse into it; all children pass → the bug is
-// this module's own logic → rebuild it. Re-test after each fix. `budget.ops` caps
-// total test/fix operations across the whole build to control cost.
+// this module's own logic → rebuild it. Re-test after each fix. `budget` counts
+// test/fix operations across the whole build and warns past a threshold (no hard cap).
 // Returns true if `entry` ends up functionally verified.
 // llm = BUILDER (rebuilds broken code). vllm = VERIFIER (writes/runs the oracle
 // via funcTest) — kept separate so the test that judges the code is written by a
