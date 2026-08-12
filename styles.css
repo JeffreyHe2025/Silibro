@@ -1406,3 +1406,6 @@ body.console-resizing, body.console-resizing * {
 .mod-tab.active { background: #2f6feb; color: #fff; }
 .mod-code { flex: 1 1 auto; overflow: auto; margin: 0; padding: 10px; border-radius: 8px;
   background: #0f1420; color: #d6deeb; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
+
+/* Modules browser close button: black text, not gray */
+#modules-close { color: #111 !important; }
