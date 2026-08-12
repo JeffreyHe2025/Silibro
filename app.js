@@ -114,7 +114,6 @@
   var syncBtn = $("sync-btn");
   var moreBtn = $("more-btn");
   var moreMenu = $("more-menu");
-  var generateTbBtn = $("generate-tb");
   var runSimBtn = $("run-sim");
   var synthProjectBtn = $("synth-project");
   var clearBtn = $("clear-output");
@@ -3264,58 +3263,6 @@
 
   function isVerilogName(name) { return /\.(v|sv|svh|vh)$/i.test(name || ""); }
 
-  // ---- Generate a whole-project testbench: the Verifier writes one against the
-  // spec, saves it into Files, and runs it. (To use your own, just Import a file.)
-  if (generateTbBtn) generateTbBtn.addEventListener("click", async function () {
-    if (moreMenu) moreMenu.classList.add("hidden");
-    if (currentProjectId == null) { alert("Open a project first."); return; }
-    var base = getBackendUrl();
-    if (!base) { alert("Set a backend first (Console → ⚙ Backend)."); return; }
-    var provider = currentProvider();
-    var key = getProviderKey(provider);
-    if (!key) { alert("Connect an LLM first (add an API key in the LLM panel)."); return; }
-    syncCurrentFileFromEditor();
-    var vfiles = files.filter(function (f) { return isVerilogName(f.name); })
-      .map(function (f) { return { name: f.name, code: f.code || "" }; });
-    if (!vfiles.length) { alert("No Verilog files to test yet."); return; }
-    // Assemble the spec from any files marked as specs (or a spec.md).
-    var specFiles = getSpecIds()
-      .map(function (id) { return files.find(function (f) { return f.id === id; }); })
-      .filter(Boolean);
-    if (!specFiles.length) {
-      var sm = files.find(function (f) { return /^spec\.md$/i.test(f.name); });
-      if (sm) specFiles = [sm];
-    }
-    var specText = specFiles.map(function (s) { return s.code || ""; }).join("\n\n");
-
-    generateTbBtn.disabled = true;
-    consoleLog("🤖 Verifier is writing a whole-project testbench…", "info");
-    try {
-      var resp = await fetch(base + "/testbench", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: vfiles, spec: specText, provider: provider, key: key, model: getProviderModel(provider) }),
-      });
-      var data = await resp.json();
-      if (data.error) { consoleLog("✗ testbench: " + data.error, "error"); return; }
-      var name = uniqueFileName(data.name || "project_tb.v");
-      var cres = await dbCreateFile(currentProjectId, name, data.code || "");
-      if (!cres.error) {
-        files.push(cres.data);
-        files.sort(function (a, b) { return (a.name || "").localeCompare(b.name || ""); });
-        renderFileList();
-        openFile(cres.data.id);
-        consoleLog("🧪 wrote " + name + " (whole-project testbench)", "ok");
-      }
-      if (data.passed === true) consoleLog("✓ project testbench: PASSED ✓", "ok");
-      else if (data.passed === false) consoleLog("✗ project testbench: FAILED ✗" + (data.output ? " — " + String(data.output).split(";")[0] : ""), "error");
-      else consoleLog("• project testbench: inconclusive (couldn't run) " + (data.output || ""), "warn");
-    } catch (e) {
-      consoleLog("✗ testbench: couldn't reach the backend — " + ((e && e.message) || e), "error");
-    } finally {
-      generateTbBtn.disabled = false;
-    }
-  });
   // Run the CURRENTLY OPEN testbench against the whole project with the simulator
   // (vvp) and show the real result — for imported / hand-written testbenches.
   // Run simulation compiles the currently-open file + the files defining every
