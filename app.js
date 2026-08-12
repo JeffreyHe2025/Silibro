@@ -1881,6 +1881,14 @@
       consoleLog("⚠ heads up: verification/correction has passed " + (ev.threshold || 20) +
         " LLM operations and is continuing — this project is complex or buggy enough to keep needing fixes. " +
         "It won't stop on its own; watch your API usage.", "warn");
+    } else if (ev.type === "budgetDecision") {
+      consoleLog("⚠ verification has used " + (ev.used || 20) + " LLM operations — choose how to proceed…", "warn");
+      showBudgetDecision(ev.used);
+    } else if (ev.type === "budgetDecided") {
+      var msg = ev.choice === "buildOnly" ? "no more module tests — building the rest without verification"
+        : ev.choice === "raiseCutoff" ? "raised the complexity cutoff to " + (ev.cutoff || 50) + " — fewer modules get functional testing"
+        : "continuing to test all modules";
+      consoleLog("→ " + msg, "info");
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
     } else if (ev.type === "floor") {
@@ -3344,6 +3352,32 @@
     }
   });
   updateRunSimButton(); // initial state (disabled until a runnable file is open)
+
+  // ---- Mid-build verification-budget decision (3 options) --------------------
+  function sendBudgetDecision(choice) {
+    var modal = $("budget-modal");
+    if (modal) modal.classList.add("hidden");
+    var base = getBackendUrl();
+    if (!base || !flowThreadId) return;
+    fetch(base + "/flow/decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: flowThreadId, choice: choice }),
+    }).catch(function () {});
+  }
+  function showBudgetDecision(used) {
+    var modal = $("budget-modal");
+    if (!modal) { sendBudgetDecision("continue"); return; } // no UI → default
+    var usedEl = $("budget-used");
+    if (usedEl) usedEl.textContent = String(used || 20);
+    modal.classList.remove("hidden");
+  }
+  var budgetContinueBtn = $("budget-continue");
+  var budgetBuildOnlyBtn = $("budget-buildonly");
+  var budgetRaiseBtn = $("budget-raise");
+  if (budgetContinueBtn) budgetContinueBtn.addEventListener("click", function () { sendBudgetDecision("continue"); });
+  if (budgetBuildOnlyBtn) budgetBuildOnlyBtn.addEventListener("click", function () { sendBudgetDecision("buildOnly"); });
+  if (budgetRaiseBtn) budgetRaiseBtn.addEventListener("click", function () { sendBudgetDecision("raiseCutoff"); });
   // ---- Synthesize the WHOLE project with yosys (the final step) --------------
   // Run this once the LLMs have finished building and verifying: it takes the
   // assembled design (testbenches excluded automatically), runs the full yosys

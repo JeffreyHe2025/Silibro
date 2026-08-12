@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=25" />
+  <link rel="stylesheet" href="styles.css?v=26" />
 </head>
 <body>
   <header class="topbar">
@@ -188,6 +188,17 @@
     </div>
   </section>
 
+  <!-- ============ Verification-budget decision ============ -->
+  <div id="budget-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Verification is getting expensive</h3>
+      <p class="spec-sub">The Verifier has run <b id="budget-used">20</b>+ LLM operations checking and fixing modules, and is still going. How should the rest of the build proceed?</p>
+      <button id="budget-continue" class="btn">Continue testing all modules</button>
+      <button id="budget-buildonly" class="btn">Stop testing — just build the rest</button>
+      <button id="budget-raise" class="btn">Test only more-complex modules (raise the cutoff)</button>
+    </div>
+  </div>
+
   <!-- ============ Delete confirmation ============ -->
   <div id="del-modal" class="modal-overlay hidden">
     <div class="modal">
@@ -304,7 +315,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=25"></script>
-  <script src="app.js?v=25"></script>
+  <script src="config.js?v=26"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>

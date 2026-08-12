@@ -243,9 +243,10 @@ function computeFeatures(code) {
 // numeric cutoff separates trivial select/wiring/register logic (smoke) from the
 // rest (functional). Cutoff is configurable via FLOOR_CUTOFF (default 22).
 const FLOOR_CUTOFF = parseInt(process.env.FLOOR_CUTOFF, 10) || 22;
-function routeTier(score, features) {
+function routeTier(score, features, cutoff) {
+  cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
-  if (score >= FLOOR_CUTOFF) return "functional";
+  if (score >= cutoff) return "functional";
   return "smoke"; // trivial, non-computing → code-only floor tier is enough
 }
 
@@ -597,15 +598,15 @@ function suspectChildren(entry, modByName) {
 // via funcTest) — kept separate so the test that judges the code is written by a
 // different model than the one that wrote (and fixes) the code.
 // The verification/fix pass is NOT hard-capped — complex or buggy projects can
-// legitimately need many corrections. We only COUNT operations and warn the user
-// once, when they pass a soft threshold, so a runaway/expensive build is visible.
-// (It's still bounded by maxRounds per module × the module tree, so it can't loop
-// forever.)
-function chargeBudget(budget, onProgress) {
+// legitimately need many corrections. We COUNT operations and, once they pass a
+// soft threshold, flag a one-time decision point (handled in the build loop: the
+// interactive flow asks the user, the plain /build endpoint just warns). Still
+// bounded by maxRounds per module × the module tree, so it can't loop forever.
+function chargeBudget(budget) {
   budget.used = (budget.used || 0) + 1;
-  if (!budget.warned && budget.used > (budget.warnAt || 20)) {
-    budget.warned = true;
-    if (onProgress) onProgress({ type: "budgetWarn", used: budget.used, threshold: budget.warnAt || 20 });
+  if (!budget.crossed && budget.used > (budget.warnAt || 20)) {
+    budget.crossed = true;
+    budget.needsDecision = true;
   }
 }
 
@@ -614,7 +615,7 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
   const emit = (o) => { if (onProgress) onProgress(Object.assign({ type: "drill", depth: depth }, o)); };
   const maxRounds = 3;
   for (let round = 1; round <= maxRounds; round++) {
-    chargeBudget(budget, onProgress);
+    chargeBudget(budget);
     const res = await funcTest(vllm, spec, entry, builtFiles); // Verifier's oracle
     entry.funcTbPassed = res.passed;
     entry.funcTbOutput = res.details;
@@ -630,7 +631,7 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
     const candidates = suspectChildren(entry, modByName);
     let culprit = null;
     for (const child of candidates) {
-      chargeBudget(budget, onProgress);
+      chargeBudget(budget);
       emit({ module: child.name, msg: "testing child of " + entry.name });
       const cres = await funcTest(vllm, spec, child, builtFiles); // Verifier's oracle
       child.funcTbPassed = cres.passed; child.funcTbOutput = cres.details;
@@ -663,7 +664,11 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
 // functional oracle testbench + reviews spec conformance) — a DIFFERENT model, so
 // the oracle is independent of the code it checks. Falls back to the builder LLM
 // when no verifier is given (e.g. the single-model /build endpoint).
-async function buildDesign(llm, spec, onProgress, verifierLLM) {
+// decide (optional) is an async fn ({ used }) -> "continue" | "buildOnly" |
+// "raiseCutoff", called ONCE when verification passes the soft threshold, so the
+// interactive flow can ask the user how to proceed. Without it (e.g. /build), the
+// build just continues and warns.
+async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   verifierLLM = verifierLLM || llm;
   const modules = await planGraph(llm, spec);
   const { order, cycle } = topoSort(modules);
@@ -684,12 +689,30 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
   manifest.forEach((x) => (manifestByName[x.name] = x));
   // Build-wide budget for functional-correction operations (test/fix), so a
   // pathological design can't spawn unbounded LLM calls.
-  const fixBudget = { used: 0, warnAt: 20, warned: false }; // no hard cap; warn past warnAt
+  const fixBudget = { used: 0, warnAt: 20, crossed: false, needsDecision: false };
+  // Mutable verification policy — a mid-build decision (or the plain warn path)
+  // can change these for the REMAINING modules.
+  let stopTests = false;   // "buildOnly": skip LLM verification (conformance + oracle)
+  let cutoff = FLOOR_CUTOFF; // "raiseCutoff": bump so fewer modules hit the functional tier
 
   const builtFiles = {};
   const results = [];
   const summaries = [];
   for (const mod of order) {
+    // Verification passed the soft threshold last iteration → resolve the policy
+    // before doing any more verification. Interactive flow asks; else just warn.
+    if (fixBudget.needsDecision) {
+      fixBudget.needsDecision = false;
+      if (decide) {
+        let choice = "continue";
+        try { choice = await decide({ used: fixBudget.used }); } catch (_) {}
+        if (choice === "buildOnly") { stopTests = true; if (onProgress) onProgress({ type: "budgetDecided", choice: "buildOnly" }); }
+        else if (choice === "raiseCutoff") { cutoff = 50; if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
+        else if (onProgress) onProgress({ type: "budgetDecided", choice: "continue" });
+      } else if (onProgress) {
+        onProgress({ type: "budgetWarn", used: fixBudget.used, threshold: fixBudget.warnAt });
+      }
+    }
     if (onProgress) onProgress({ type: "building", module: mod.name });
     const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest);
     if (r.ok) {
@@ -703,10 +726,10 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
       // module's summary against the spec (ports, behavior, and especially
       // clock/reset style) AS IT IS BUILT — and any violation is sent straight
       // back to the Builder to fix, instead of only being reported at the end.
-      for (let cround = 1; cround <= 2; cround++) {
+      for (let cround = 1; !stopTests && cround <= 2; cround++) {
         const conf = await checkConformance(verifierLLM, spec, mod, summary); // Verifier reviews
         if (!conf || conf.conforms) break; // conforms, or inconclusive
-        chargeBudget(fixBudget, onProgress);
+        chargeBudget(fixBudget);
         if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
         const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, conf.issues);
         if (!fixed) break;
@@ -726,7 +749,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
       const llmScore = summary.complexity != null ? summary.complexity : codeScore;
       const finalScore = Math.round(((llmScore + codeScore) / 2) * 10) / 10;
       // Route to a verification tier: smoke (code-only floor) vs functional (oracle).
-      const tier = routeTier(finalScore, features);
+      const tier = routeTier(finalScore, features, cutoff);
       if (entry) {
         entry.built = true;
         entry.complexity = finalScore;
@@ -771,7 +794,11 @@ async function buildDesign(llm, spec, onProgress, verifierLLM) {
         entry.smokeSimOutput = smoke.markers;
         const smokeOk = smoke.passed !== false; // fail only on a real X/module failure
 
-        if (tier === "smoke") {
+        if (stopTests) {
+          // "buildOnly" chosen at the decision point: no more LLM verification —
+          // keep the free structural signal (lint/synth/smoke) but skip the oracle.
+          entry.verification = structuralOk && smokeOk ? "smoke" : "unverified";
+        } else if (tier === "smoke") {
           entry.verification = structuralOk && smokeOk ? "smoke" : "unverified";
         } else {
           // FUNCTIONAL ORACLE TESTBENCH + fault localization & correction.

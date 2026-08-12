@@ -12,7 +12,7 @@ const express = require("express");
 const cors = require("cors");
 const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
-const { startFlow, resumeFlow } = require("./flow");
+const { startFlow, resumeFlow, resolveDecision } = require("./flow");
 
 const app = express();
 app.use(cors()); // allow the browser frontend to call this
@@ -198,6 +198,15 @@ app.post("/flow/start", async (req, res) => {
 //   { approved:true }            -> ...events..., { done:true, files, log }
 //   { approved:false, changes }  -> { done:false, spec }   (no build events)
 // The frontend reads the stream and logs each event live.
+// Resolve a mid-build "budget decision" the build is waiting on (see the
+// budgetDecision event). choice: "continue" | "buildOnly" | "raiseCutoff".
+app.post("/flow/decision", (req, res) => {
+  const { threadId, choice } = req.body || {};
+  if (!threadId || !choice) return res.status(400).json({ error: "threadId and choice required" });
+  const ok = resolveDecision(threadId, choice);
+  res.json({ ok });
+});
+
 app.post("/flow/approve", async (req, res) => {
   const { threadId, approved, changes } = req.body || {};
   if (!threadId) return res.status(400).json({ error: "threadId required" });

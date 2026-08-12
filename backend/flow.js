@@ -29,6 +29,17 @@ async function lg() {
 // stream them to the browser as they happen, instead of one dump at the end.
 const progressListeners = new Map();
 
+// Mid-build decision channel, keyed by threadId. When the build passes the
+// verification threshold it emits a "budgetDecision" event and awaits the user's
+// choice; POST /flow/decision resolves the pending promise here so the build (which
+// is still running inside the open stream) can continue.
+const pendingDecisions = new Map(); // threadId -> resolve(choice)
+function resolveDecision(threadId, choice) {
+  const r = pendingDecisions.get(threadId);
+  if (r) { pendingDecisions.delete(threadId); r(choice); return true; }
+  return false;
+}
+
 let _graph = null;
 async function getGraph() {
   if (_graph) return _graph;
@@ -93,13 +104,24 @@ async function getGraph() {
   async function builder(state) {
     const log = [];
     const emit = progressListeners.get(state.threadId); // live stream, if attached
+    // Pause once past the verification threshold and ask the user how to proceed.
+    // Awaits a promise resolved by POST /flow/decision; defaults to "continue" if
+    // nothing answers within a few minutes so a closed tab can't hang the build.
+    const decide = (info) => new Promise((resolve) => {
+      let done = false;
+      const finish = (choice) => { if (done) return; done = true; pendingDecisions.delete(state.threadId); resolve(choice); };
+      pendingDecisions.set(state.threadId, finish);
+      if (emit) emit({ type: "budgetDecision", used: info.used });
+      setTimeout(() => finish("continue"), 300000); // 5-min fallback
+    });
     const out = await buildDesign(
       { provider: state.provider, key: state.key, model: state.builderModel },
       state.spec,
       function (ev) { log.push(ev); if (emit) emit(ev); },
       // The VERIFIER model writes the functional oracle testbench + conformance
       // review — independent of the Builder that wrote the code.
-      { provider: state.provider, key: state.key, model: state.verifierModel }
+      { provider: state.provider, key: state.key, model: state.verifierModel },
+      decide
     );
     return {
       files: out.files || {},
@@ -221,4 +243,4 @@ async function resumeFlow(threadId, decision, onProgress) {
   }
 }
 
-module.exports = { startFlow, resumeFlow };
+module.exports = { startFlow, resumeFlow, resolveDecision };
