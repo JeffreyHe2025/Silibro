@@ -13,10 +13,37 @@ const cors = require("cors");
 const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow, resolveDecision } = require("./flow");
+const { runWithUsage, callLLM } = require("./llm");
+const {
+  billingReady, authUser, assertCredits, chargeUsage,
+  billingRouter, billingWebhook,
+} = require("./billing");
 
 const app = express();
 app.use(cors()); // allow the browser frontend to call this
+
+// Stripe webhook needs the RAW body for signature verification, so it must be
+// registered BEFORE express.json() parses everything else.
+app.post("/billing/webhook", ...billingWebhook);
+
 app.use(express.json({ limit: "4mb" }));
+
+// JSON billing routes (account balance, usage history, checkout).
+app.use("/billing", billingRouter);
+
+// Run a handler that makes Bedrock calls, but only for a signed-in user with a
+// positive credit balance; meter the token usage and debit the balance after.
+// For any non-bedrock provider this is a passthrough (BYOK, no metering).
+//   returns { result, balance }  (balance in dollars, or null when not metered)
+async function withBilling(req, provider, kind, fn) {
+  if (provider !== "bedrock") return { result: await fn(), balance: null };
+  if (!billingReady()) { const e = new Error("billing not configured"); e.status = 500; throw e; }
+  const userId = await authUser(req);
+  await assertCredits(userId);
+  const { result, usage } = await runWithUsage(fn);
+  const micros = await chargeUsage(userId, kind, usage);
+  return { result, balance: micros / 1e6 };
+}
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -146,21 +173,44 @@ app.post("/synthesize", async (req, res) => {
   }
 });
 
+// Single chat turn through Bedrock (server creds), metered against credits.
+// The browser sends its Supabase JWT (Authorization: Bearer …) instead of a key.
+//   body: { model, system?, messages:[{role,content,images?}] }
+//   -> { reply, balance }   (402 when out of credits)
+app.post("/bedrock/chat", async (req, res) => {
+  const { model, system, messages } = req.body || {};
+  if (!model || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "model and messages[] are required" });
+  }
+  try {
+    const { result, balance } = await withBilling(req, "bedrock", "chat", () =>
+      callLLM({ provider: "bedrock", model, system, messages })
+    );
+    res.json({ reply: result, balance });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // Full bottom-up build from a spec/prompt.
 app.post("/build", async (req, res) => {
   const { spec, provider, key, model } = req.body || {};
-  if (!spec || !provider || !key || !model) {
-    return res.status(400).json({ error: "spec, provider, key, model are required" });
+  // Bedrock uses the server's creds (no BYOK key); everyone else must send one.
+  if (!spec || !provider || !model || (provider !== "bedrock" && !key)) {
+    return res.status(400).json({ error: "spec, provider, model (and key for BYOK) are required" });
   }
   try {
-    const log = [];
-    const out = await buildDesign({ provider, key, model }, spec, (ev) => {
-      log.push(ev);
-      console.log("[build]", JSON.stringify(ev));
+    const { result: out, balance } = await withBilling(req, provider, "build", async () => {
+      const log = [];
+      const built = await buildDesign({ provider, key, model }, spec, (ev) => {
+        log.push(ev);
+        console.log("[build]", JSON.stringify(ev));
+      });
+      return { ...built, log };
     });
-    res.json({ ...out, log });
+    res.json({ ...out, balance });
   } catch (e) {
-    res.status(500).json({ error: String((e && e.message) || e) });
+    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
   }
 });
 
@@ -170,25 +220,27 @@ app.post("/build", async (req, res) => {
 // Returns { threadId, done:false, spec }.
 app.post("/flow/start", async (req, res) => {
   const { prompt, images, provider, key, verifierModel, builderModel } = req.body || {};
-  if (!prompt || !provider || !key || !(verifierModel || builderModel)) {
-    return res.status(400).json({ error: "prompt, provider, key and a model are required" });
+  if (!prompt || !provider || !(verifierModel || builderModel) || (provider !== "bedrock" && !key)) {
+    return res.status(400).json({ error: "prompt, provider, a model (and key for BYOK) are required" });
   }
   try {
     const threadId = crypto.randomUUID();
-    const out = await startFlow(
-      {
-        prompt: prompt,
-        images: images,
-        provider: provider,
-        key: key,
-        verifierModel: verifierModel || builderModel,
-        builderModel: builderModel || verifierModel,
-      },
-      threadId
+    const { result: out, balance } = await withBilling(req, provider, "flow", () =>
+      startFlow(
+        {
+          prompt: prompt,
+          images: images,
+          provider: provider,
+          key: key,
+          verifierModel: verifierModel || builderModel,
+          builderModel: builderModel || verifierModel,
+        },
+        threadId
+      )
     );
-    res.json({ threadId, ...out });
+    res.json({ threadId, ...out, balance });
   } catch (e) {
-    res.status(500).json({ error: String((e && e.message) || e) });
+    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
   }
 });
 
@@ -208,7 +260,7 @@ app.post("/flow/decision", (req, res) => {
 });
 
 app.post("/flow/approve", async (req, res) => {
-  const { threadId, approved, changes } = req.body || {};
+  const { threadId, approved, changes, provider } = req.body || {};
   if (!threadId) return res.status(400).json({ error: "threadId required" });
 
   res.setHeader("Content-Type", "application/x-ndjson");
@@ -218,12 +270,17 @@ app.post("/flow/approve", async (req, res) => {
   const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
 
   try {
-    const out = await resumeFlow(
-      threadId,
-      { approved: !!approved, changes: changes || "" },
-      (ev) => send({ type: "progress", event: ev }) // live build events
+    // The Builder (the token-heavy phase) runs here, so meter/charge here too.
+    // The frontend forwards its JWT + provider so Bedrock runs get billed. Out of
+    // credits surfaces as an { error } stream line (headers are already sent).
+    const { result: out, balance } = await withBilling(req, provider || "byok", "flow", () =>
+      resumeFlow(
+        threadId,
+        { approved: !!approved, changes: changes || "" },
+        (ev) => send({ type: "progress", event: ev }) // live build events
+      )
     );
-    send({ threadId, ...out }); // final line: {done, files, log} or {done:false, spec}
+    send({ threadId, ...out, balance }); // final line: {done, files, log} or {done:false, spec}
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }

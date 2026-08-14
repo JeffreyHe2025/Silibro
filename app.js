@@ -532,16 +532,22 @@
     chatPanel.classList.remove("hidden");
     consolePanel.classList.remove("hidden"); // permanent bottom-docked console
     consoleToggle.classList.add("hidden");
+    var addCreditsBtn = $("add-credits");
     if (session) {
       userEmail.textContent = session.user.email;
       userEmail.classList.remove("hidden");
       signOutBtn.classList.remove("hidden");
       signInBtn.classList.add("hidden");
+      if (addCreditsBtn) addCreditsBtn.classList.remove("hidden"); // Bedrock credits
+      refreshCredits();
+      handleTopupReturn();
     } else {
       userEmail.textContent = "";
       userEmail.classList.add("hidden");
       signOutBtn.classList.add("hidden");
       signInBtn.classList.remove("hidden");
+      if (addCreditsBtn) addCreditsBtn.classList.add("hidden");
+      updateCreditsBadge(null); // guests can't use Bedrock credits
     }
     // Reset selection when switching between accounts / guest.
     projects = [];
@@ -1773,7 +1779,7 @@
         try {
           resp = await fetch(base + "/flow/start", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
             body: JSON.stringify({ prompt: fullPrompt, provider: provider, key: key, builderModel: model }),
           });
           break; // successfully connected!
@@ -1785,7 +1791,9 @@
       }
 
       var data = await resp.json();
+      if (typeof data.balance === "number") updateCreditsBadge(data.balance);
       if (data.error) {
+        if (/credit/i.test(data.error)) onOutOfCredits();
         bubble.textContent = "⚠ " + data.error;
         bubble.classList.add("chat-error");
         return;
@@ -1828,8 +1836,8 @@
         try {
           resp = await fetch(base + "/flow/approve", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ threadId: flowThreadId, approved: approved, changes: changes || "" }),
+            headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+            body: JSON.stringify({ threadId: flowThreadId, approved: approved, changes: changes || "", provider: currentProvider() }),
           });
           break; // successfully connected!
         } catch (e) {
@@ -1842,8 +1850,10 @@
       // The response is newline-delimited JSON: build events stream in live,
       // then a final line carries the result. (Rejections send only that line.)
       var data = await readFlowStream(resp);
+      if (data && typeof data.balance === "number") updateCreditsBadge(data.balance); // Bedrock spend
       if (!data || data.error) {
         var errText = "⚠ " + ((data && data.error) || "no response from backend");
+        if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
         if (bubble) { bubble.textContent = errText; bubble.classList.add("chat-error"); }
         else specModalText.textContent = errText;
         setSpecBusy(false);
@@ -1853,6 +1863,7 @@
       if (!approved) hideSpecModal(); // hide it if it was open during revise
       flowThreadId = null;
       await finishFlowBuild(data);
+      refreshCredits();
     } catch (e) {
       var errText = "⚠ " + ((e && e.message) || e);
       if (bubble) { bubble.textContent = errText; bubble.classList.add("chat-error"); }
@@ -2263,6 +2274,64 @@
   // ---- Backend (EC2) compile checks via iverilog ----
   function getBackendUrl() { return "https://verilogprojectcreate.duckdns.org"; }
 
+  // ---- Bedrock prepaid-credits plumbing -------------------------------------
+  // The Bedrock provider has no BYOK key: the browser sends the signed-in user's
+  // Supabase JWT, the backend calls Bedrock with its own AWS creds, and each call
+  // is billed to the user's prepaid balance.
+  function isSignedIn() { return !GUEST; }
+  async function authHeaders() {
+    try {
+      var r = await sb.auth.getSession();
+      var tok = r && r.data && r.data.session && r.data.session.access_token;
+      return tok ? { Authorization: "Bearer " + tok } : {};
+    } catch (e) { return {}; }
+  }
+  function updateCreditsBadge(dollars) {
+    var badge = $("credits-badge");
+    if (!badge) return;
+    if (dollars == null || !isSignedIn()) { badge.classList.add("hidden"); return; }
+    badge.textContent = "Credits: $" + Number(dollars).toFixed(2);
+    badge.classList.remove("hidden");
+    badge.classList.toggle("credits-low", Number(dollars) <= 0);
+  }
+  async function refreshCredits() {
+    if (!isSignedIn()) { updateCreditsBadge(null); return; }
+    try {
+      var headers = await authHeaders();
+      if (!headers.Authorization) return;
+      var r = await fetch(getBackendUrl() + "/billing/account", { headers: headers });
+      var d = await r.json();
+      if (r.ok && typeof d.credits === "number") updateCreditsBadge(d.credits);
+    } catch (e) { /* leave badge as-is */ }
+  }
+  async function startTopup() {
+    if (!isSignedIn()) { alert("Sign in first to buy credits."); return; }
+    try {
+      var headers = Object.assign({ "Content-Type": "application/json" }, await authHeaders());
+      var r = await fetch(getBackendUrl() + "/billing/checkout", { method: "POST", headers: headers, body: "{}" });
+      var d = await r.json();
+      if (d.url) { window.location.href = d.url; return; }
+      alert("Couldn't start checkout: " + (d.error || r.status));
+    } catch (e) { alert("Couldn't start checkout: " + ((e && e.message) || e)); }
+  }
+  // Called when a Bedrock call returns 402. Nudge the user to top up.
+  function onOutOfCredits() {
+    updateCreditsBadge(0);
+    if (confirm("You're out of Bedrock credits. Add more now?")) startTopup();
+  }
+  // After returning from Stripe Checkout (?topup=success), refresh the balance.
+  function handleTopupReturn() {
+    var q = window.location.search || "";
+    if (q.indexOf("topup=success") >= 0) {
+      // Webhook applies the credit; poll a couple times in case it's a beat behind.
+      setTimeout(refreshCredits, 1500);
+      setTimeout(refreshCredits, 5000);
+    }
+    if (q.indexOf("topup=") >= 0 && window.history && window.history.replaceState) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }
+
 
   // POST files to the backend's /compile endpoint → { ok, output } (or null).
   async function backendCompile(files) {
@@ -2358,6 +2427,16 @@
   var conversations = []; // [{id, title, updated_at}] for the history list
 
   var PROVIDER_INFO = {
+    bedrock: {
+      model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      account: true, // no BYOK key — uses the signed-in user's prepaid credits
+      hint: "No API key needed — sign in and add credits. The app calls Amazon Bedrock for you and bills your prepaid balance.",
+      models: [
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "anthropic.claude-3-haiku-20240307-v1:0",
+      ],
+    },
     openrouter: {
       model: "",
       hint: "Key from openrouter.ai/keys — works in the browser, one key for many models.",
@@ -2400,6 +2479,10 @@
   function currentProvider() { return localStorage.getItem("llm_provider") || "openrouter"; }
   
   function getProviderKey(p) {
+    // Bedrock has no BYOK key: "connected" means signed in (JWT sent per request).
+    // Return a non-secret sentinel so the existing `if (!key)` gates pass; the
+    // backend ignores it and uses the user's auth + its own AWS creds.
+    if (p === "bedrock") return isSignedIn() ? "account" : "";
     var conns = getConnections();
     var activeId = getActiveConnectionId();
     var active = conns.find(function(c) { return c.id === activeId; });
@@ -2471,6 +2554,18 @@
   function updateProviderUI() {
     var p = chatProvider.value;
     var info = PROVIDER_INFO[p] || PROVIDER_INFO.openrouter;
+    // Bedrock: no API key field — it uses the signed-in account's prepaid credits.
+    if (info.account) {
+      chatKeyInput.classList.add("hidden");
+      chatSetupHint.textContent = isSignedIn()
+        ? "✓ Signed in — Bedrock will use your prepaid credits. Click Connect, then add credits with “+ Credits”."
+        : "Sign in to use Amazon Bedrock — it bills your account's prepaid credits instead of an API key.";
+      chatKeySave.textContent = "Connect";
+      renderSavedKeysList();
+      return;
+    }
+    chatKeyInput.classList.remove("hidden");
+    chatKeySave.textContent = "Save & connect";
     var hasKey = !!getProviderKey(p);
     chatSetupHint.textContent = hasKey
       ? "✓ You have a saved connection for this provider — click Connect, or paste a new key to add another."
@@ -2844,6 +2939,15 @@
 
   async function saveChatKey() {
     var provider = chatProvider.value;
+    // Bedrock has no key: "connecting" just means selecting it while signed in.
+    if (provider === "bedrock") {
+      if (!isSignedIn()) { alert("Sign in first — Bedrock uses your account's prepaid credits, not an API key."); return; }
+      localStorage.setItem("llm_provider", "bedrock");
+      setProviderModel("bedrock", getProviderModel("bedrock") || PROVIDER_INFO.bedrock.model);
+      renderChatView();
+      refreshCredits();
+      return;
+    }
     var typed = chatKeyInput.value.trim();
     // Use a freshly-typed key, or fall back to this provider's remembered key.
     var key = typed || getProviderKey(provider);
@@ -2892,6 +2996,25 @@
   // Call the right endpoint for the chosen provider; return the reply text.
   // `system` carries the project files + edit instructions (handled per provider).
   async function callLLM(provider, key, model, system, history) {
+    if (provider === "bedrock") {
+      // Server-side call via the backend: browser sends its JWT, backend uses its
+      // AWS creds and bills the user's prepaid credits.
+      var bhead = await authHeaders();
+      if (!bhead.Authorization) throw new Error("Sign in to use Amazon Bedrock credits.");
+      var bmsgs = history.map(function (m) {
+        return { role: m.role, content: m.content || "", images: m.images || [] };
+      });
+      var br = await fetch(getBackendUrl() + "/bedrock/chat", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, bhead),
+        body: JSON.stringify({ model: model, system: system, messages: bmsgs }),
+      });
+      var bd = await br.json();
+      if (br.status === 402) { onOutOfCredits(); throw new Error("Out of Bedrock credits — add credits to continue."); }
+      if (!br.ok || bd.error) throw new Error(bd.error || ("Bedrock error " + br.status));
+      if (typeof bd.balance === "number") updateCreditsBadge(bd.balance);
+      return bd.reply || "";
+    }
     if (provider === "anthropic") {
       var amsgs = history.map(function (m) {
         if (m.images && m.images.length) {
@@ -3795,6 +3918,7 @@
   detectTopBtn.addEventListener("click", detectTopWithAI);
 
   signOutBtn.addEventListener("click", function () { sb.auth.signOut(); });
+  (function () { var b = $("add-credits"); if (b) b.addEventListener("click", startTopup); })();
   if (signInBtn) signInBtn.addEventListener("click", openSignIn);
   if (authGuestLink) authGuestLink.addEventListener("click", function (e) {
     e.preventDefault();

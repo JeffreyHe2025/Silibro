@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=38" />
+  <link rel="stylesheet" href="styles.css?v=39" />
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +13,8 @@
       <h1>Verilog Coder</h1>
     </div>
     <div id="user-area" class="user-area hidden">
+      <span id="credits-badge" class="credits-badge hidden" title="Your prepaid Bedrock credits">Credits: $0.00</span>
+      <button id="add-credits" class="btn btn-small hidden" title="Buy more Bedrock credits">+ Credits</button>
       <span id="user-email" class="user-email"></span>
       <button id="sign-in" class="btn btn-small hidden" title="Sign in to save your projects to your account">Sign in to save</button>
       <button id="sign-out" class="btn btn-small hidden">Sign out</button>
@@ -157,6 +159,7 @@
       </p>
       <label class="chat-setup-label">Provider</label>
       <select id="chat-provider" class="chat-field">
+        <option value="bedrock">Amazon Bedrock — prepaid credits, no key</option>
         <option value="openrouter">OpenRouter — many models, one key</option>
         <option value="openai">OpenAI (direct)</option>
         <option value="anthropic">Anthropic / Claude (direct)</option>
@@ -331,7 +334,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=38"></script>
-  <script src="app.js?v=38"></script>
+  <script src="config.js?v=39"></script>
+  <script src="app.js?v=39"></script>
 </body>
 </html>

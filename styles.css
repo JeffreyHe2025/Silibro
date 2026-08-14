@@ -1418,3 +1418,8 @@ body.console-resizing, body.console-resizing * {
 .mod-stale { background: #fde2e1; color: #b42318; }
 .mod-stale-warn { background: #fff4e5; color: #92400e; border: 1px solid #f6c177;
   border-radius: 6px; padding: 6px 8px; font-size: 12px; margin: 6px 0 8px; }
+
+/* Bedrock prepaid-credits badge in the top bar */
+.credits-badge { font-size: 12px; font-weight: 600; color: #1a7f37; background: #e7f6ec;
+  border: 1px solid #b6e3c4; border-radius: 12px; padding: 2px 10px; white-space: nowrap; }
+.credits-badge.credits-low { color: #b42318; background: #fde2e1; border-color: #f3b4ae; }
