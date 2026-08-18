@@ -722,6 +722,74 @@ async function finalConformanceSweep(ctx) {
   }
 }
 
+// USER-TRIGGERED RE-FIX from the final review: rewrite the modules the Verifier
+// flagged as mismatched (guided by the review text), then re-verify each one —
+// recompute complexity and re-run the functional oracle testbench. Works from the
+// manifest the frontend already holds (name/purpose/dependsOn/code/summary), so no
+// fragile re-parsing of files. Streams progress via onProgress. Returns updated
+// files + manifest + a fresh review + overall pass/fail.
+async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgress) {
+  verifierLLM = verifierLLM || llm;
+  onProgress = onProgress || function () {};
+  const list = (manifest || []).filter((m) => m && m.name && m.code);
+  if (!list.length) return { files: {}, manifest: manifest || [], summaries: [], review: "", passed: null, fixed: [] };
+  const byName = {}, builtFiles = {};
+  list.forEach((m) => { byName[m.name] = m; builtFiles[m.name] = m.code; });
+
+  // Fresh summaries (reuse the stored one; else describe the current code).
+  const summaries = [];
+  for (const m of list) {
+    const summary = m.summary || (await summarizeModule(llm, { name: m.name, purpose: m.purpose || "" }, m.code));
+    m.summary = summary;
+    summaries.push(summary);
+  }
+
+  // Which modules mismatch the spec? Ask the Verifier for a per-module verdict.
+  const verdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  const bad = verdicts.filter((v) => v && !v.conforms && builtFiles[v.module]);
+  onProgress({ type: "refixPlan", modules: bad.map((v) => v.module) });
+
+  const fixed = [];
+  for (const v of bad) {
+    const info = byName[v.module] || {};
+    const mod = { name: v.module, purpose: info.purpose || "", dependsOn: info.dependsOn || [] };
+    onProgress({ type: "conformance", module: v.module, ok: false, issues: v.issues, phase: "refix" });
+    // Rewrite guided by BOTH the structured issue and the full prose review.
+    const guidance = (v.issues || "") + (review ? "\n\nFull design review from the Verifier:\n" + review : "");
+    const code = await fixModuleConformance(llm, spec, mod, builtFiles, guidance);
+    if (!code) { onProgress({ type: "conformance", module: v.module, ok: false, issues: "could not rewrite", phase: "refix" }); continue; }
+    builtFiles[v.module] = code;
+
+    // Re-verify: complexity + functional oracle testbench (as requested).
+    const summary = await summarizeModule(llm, mod, code);
+    const idx = summaries.findIndex((x) => x && x.module === v.module);
+    if (idx >= 0) summaries[idx] = summary;
+    const features = computeFeatures(code);
+    const codeScore = baselineScore(features);
+    const llmScore = summary.complexity != null ? summary.complexity : codeScore;
+    const finalScore = Math.round(((llmScore + codeScore) / 2) * 10) / 10;
+    const entry = { name: v.module, purpose: mod.purpose, dependsOn: mod.dependsOn, summary };
+    const ft = await funcTest(verifierLLM, spec, entry, builtFiles); // sets entry.funcTb
+    onProgress({ type: "floor", module: v.module, tier: "functional", complexity: finalScore, funcTbPassed: ft.passed, funcTbReason: ft.details, verification: ft.passed === true ? "functional" : "unverified", phase: "refix" });
+
+    Object.assign(byName[v.module], {
+      code: code, summary: summary, complexity: finalScore, tier: "functional",
+      funcTb: entry.funcTb || byName[v.module].funcTb || "",
+      funcTbPassed: ft.passed, verification: ft.passed === true ? "functional" : "unverified",
+    });
+    fixed.push(v.module);
+  }
+
+  // Fresh overall verdict on the updated summaries.
+  const finalVerdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  const allConform = finalVerdicts.length ? finalVerdicts.every((v) => v.conforms) : true;
+  const reviewText =
+    "**Overall Verdict: " + (allConform ? "PASSED" : "FAILED") + "**\n\n" +
+    finalVerdicts.map((v) => "- **" + v.module + "**: " + (v.conforms ? "conforms" : "MISMATCH \u2014 " + v.issues)).join("\n");
+
+  return { files: builtFiles, manifest: list, summaries, review: reviewText, passed: allConform, fixed };
+}
+
 // llm = the BUILDER (writes/fixes code). verifierLLM = the VERIFIER (writes the
 // functional oracle testbench + reviews spec conformance) — a DIFFERENT model, so
 // the oracle is independent of the code it checks. Falls back to the builder LLM
@@ -1039,4 +1107,4 @@ async function repairProjectTestbench(llm, spec, files, prevCode, compileError) 
   return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
 }
 
-module.exports = { buildDesign, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };
+module.exports = { buildDesign, refixFromReview, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };

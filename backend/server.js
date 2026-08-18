@@ -13,7 +13,7 @@ try { require("dotenv").config(); } catch (e) { /* dotenv optional */ }
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
-const { buildDesign, generateProjectTestbench, repairProjectTestbench } = require("./build");
+const { buildDesign, refixFromReview, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow, resolveDecision } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
@@ -215,6 +215,34 @@ app.post("/build", async (req, res) => {
   } catch (e) {
     res.status(e.status || 500).json({ error: String((e && e.message) || e) });
   }
+});
+
+// User-triggered RE-FIX from the final review: rewrite the modules the review
+// flagged as mismatched, then re-verify (complexity + functional testbench).
+// Streams NDJSON progress like /flow/approve, then a final { done, files, manifest,
+// review, passed, fixed } line. Metered for the Bedrock provider.
+//   body: { spec, manifest:[...], review, provider, key?, verifierModel?, builderModel?, model? }
+app.post("/refix", async (req, res) => {
+  const { spec, manifest, review, provider, key, verifierModel, builderModel, model } = req.body || {};
+  if (!spec || !Array.isArray(manifest) || !manifest.length || !provider || (provider !== "bedrock" && !key)) {
+    return res.status(400).json({ error: "spec, manifest[], provider (and key for BYOK) are required" });
+  }
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  try {
+    const builder = { provider, key, model: builderModel || model };
+    const verifier = { provider, key, model: verifierModel || builderModel || model };
+    const { result, balance } = await withBilling(req, provider, "refix", () =>
+      refixFromReview(builder, verifier, spec, manifest, review || "", (ev) => send({ type: "progress", event: ev }))
+    );
+    send({ done: true, ...result, balance });
+  } catch (e) {
+    send({ error: String((e && e.message) || e) });
+  }
+  res.end();
 });
 
 // --- Two-agent flow (Verifier -> approval -> Builder) via LangGraph ---------

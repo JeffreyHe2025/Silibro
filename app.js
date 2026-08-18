@@ -1888,8 +1888,11 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "refixPlan") {
+      if (ev.modules && ev.modules.length) consoleLog("🔧 re-fix plan: rewriting " + ev.modules.join(", "), "info");
+      else consoleLog("🔧 re-fix: the Verifier found no mismatched modules", "ok");
     } else if (ev.type === "conformance") {
-      var confWhere = ev.phase === "final" ? " (final review)" : "";
+      var confWhere = ev.phase === "final" ? " (final review)" : (ev.phase === "refix" ? " (re-fix)" : "");
       if (ev.ok === false) {
         consoleLog("⚠ " + ev.module + ": Verifier found a SPEC violation" + confWhere + " — sending back to the Builder to fix" +
           (ev.issues ? " (" + String(ev.issues).split("\n")[0].slice(0, 120) + ")" : ""), "warn");
@@ -2094,6 +2097,7 @@
         var msg3 = "🔎 Verifier review (from the module summaries, not the code):\n\n" + data.review;
         appendChatMsg("assistant", msg3);
         chatHistory.push({ role: "assistant", content: msg3 });
+        if (reviewFailed(data.review)) offerRefix(); // FAILED → offer a one-click re-fix
       }
       if (data.dependencyGraph) {
         var msg5 = "📊 Created dependency_graph.md — open it and click the 📊 Diagram button to view the module dependency graph.";
@@ -2107,6 +2111,104 @@
       chatHistory.push({ role: "assistant", content: msg4 });
     }
     try { await saveConversation(); } catch (e) {}
+  }
+
+  // Does the Verifier's final review carry a FAILED verdict?
+  function reviewFailed(text) {
+    if (!text) return false;
+    return /verdict[\s\S]{0,40}\bfail/i.test(text) || /\boverall[\s\S]{0,60}\bfail/i.test(text);
+  }
+
+  // Offer a one-click "rewrite the mismatched modules + re-verify" action.
+  function offerRefix() {
+    var wrap = document.createElement("div");
+    wrap.className = "chat-msg assistant refix-offer";
+    var p = document.createElement("div");
+    p.textContent = "⚠ The review found spec mismatches. Send it back to the LLM to rewrite the mismatched modules and re-verify (complexity + functional testbench)?";
+    var btn = document.createElement("button");
+    btn.className = "btn"; btn.style.marginTop = "8px";
+    btn.textContent = "🔧 Fix mismatches & re-verify";
+    btn.addEventListener("click", function () { btn.disabled = true; doRefix(btn); });
+    wrap.appendChild(p); wrap.appendChild(btn);
+    chatConversation.appendChild(wrap);
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+  }
+
+  // Merge a /refix result back into the project (files, module map, dev view).
+  async function applyRefixResult(data) {
+    lastFlowData = lastFlowData || {};
+    if (data.manifest) lastFlowData.manifest = data.manifest;
+    if (data.summaries) lastFlowData.summaries = data.summaries;
+    if (data.review) lastFlowData.review = data.review;
+    var filesObj = data.files || {};
+    var edits = Object.keys(filesObj).map(function (n) {
+      return { name: /\.s?v$/i.test(n) ? n : n + ".v", content: filesObj[n] };
+    });
+    if (data.manifest && data.manifest.length) {
+      var modMap = data.manifest.map(function (m) {
+        return { name: m.name, purpose: m.purpose, dependsOn: m.dependsOn, tier: m.tier,
+          verification: m.verification, complexity: m.complexity, summary: m.summary,
+          funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code,
+          funcTbPassed: m.funcTbPassed, smokeSimPassed: m.smokeSimPassed };
+      });
+      edits.push({ name: "module_map.json", content: JSON.stringify(modMap) });
+    }
+    if (edits.length && currentProjectId != null) await applyFileEdits(edits);
+    updateDevButton();
+    // If the module the editor is showing was rewritten, refresh it.
+    if (currentFileId != null && editor) {
+      var cur = files.find(function (f) { return f.id === currentFileId; });
+      if (cur && filesObj[cur.name.replace(/\.s?v$/i, "")]) editor.setValue(cur.code || "", -1);
+    }
+  }
+
+  // POST /refix: rewrite the review's mismatched modules and re-verify, streaming
+  // progress to the console; then apply the updated files + fresh review.
+  async function doRefix(btn) {
+    var base = getBackendUrl();
+    if (!base) { consoleLog("⚠ Set a backend first.", "error"); return; }
+    var provider = currentProvider();
+    var key = getProviderKey(provider);
+    if (!key) { renderChatView(); return; }
+    var manifest = (lastFlowData && lastFlowData.manifest) || [];
+    if (!manifest.length) { consoleLog("⚠ No module data to re-fix — run Verify & Build first.", "error"); return; }
+    var spec = lastFlowSpec || "";
+    if (!spec) { var sf = files.find(function (f) { return /^spec\.md$/i.test(f.name); }); spec = (sf && sf.code) || ""; }
+    var review = (lastFlowData && lastFlowData.review) || "";
+    var model = getProviderModel(provider);
+    var bubble = appendChatMsg("assistant", "🔧 Rewriting mismatched modules and re-verifying…");
+    consoleLog("🔧 re-fix: sending the review back to rewrite mismatched modules…", "info");
+    try {
+      var resp = await fetch(base + "/refix", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+        body: JSON.stringify({ spec: spec, manifest: manifest, review: review, provider: provider, key: key, builderModel: model, verifierModel: model }),
+      });
+      var data = await readFlowStream(resp);
+      if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
+      if (!data || data.error) {
+        bubble.textContent = "⚠ " + ((data && data.error) || "re-fix failed");
+        bubble.classList.add("chat-error");
+        if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
+        return;
+      }
+      await applyRefixResult(data);
+      var summary = (data.fixed && data.fixed.length)
+        ? "✅ Rewrote & re-verified: " + data.fixed.join(", ") + ". "
+        : "No mismatched modules needed rewriting. ";
+      bubble.textContent = summary + (data.passed ? "Verifier now: PASSED ✓" : "Verifier still reports issues.");
+      chatHistory.push({ role: "assistant", content: bubble.textContent });
+      if (data.review) {
+        appendChatMsg("assistant", "🔎 Updated Verifier review:\n\n" + data.review);
+        if (reviewFailed(data.review)) offerRefix(); // allow another pass
+      }
+      try { await saveConversation(); } catch (e) {}
+    } catch (e) {
+      bubble.textContent = "⚠ re-fix error: " + ((e && e.message) || e);
+      bubble.classList.add("chat-error");
+    } finally {
+      refreshCredits();
+    }
   }
 
   if (specApproveBtn) specApproveBtn.addEventListener("click", function () { flowDecision(true, ""); });
