@@ -2988,7 +2988,13 @@
   async function llmError(resp) {
     var e = await resp.json().catch(function () { return {}; });
     var m = (e.error && (e.error.message || e.error)) || e.message || ("HTTP " + resp.status);
-    var err = new Error(typeof m === "string" ? m : JSON.stringify(m));
+    if (typeof m !== "string") m = JSON.stringify(m);
+    // OpenRouter says "Missing Authentication header" even when a key IS sent but
+    // is invalid/expired — translate it into something the user can act on.
+    if (resp.status === 401 && /missing authentication header|no (cookie )?auth credentials/i.test(m)) {
+      m = "the API key was rejected (invalid, expired, or mis-pasted). Get a fresh key at openrouter.ai/keys, or switch providers.";
+    }
+    var err = new Error(m);
     err.status = resp.status;
     return err;
   }

@@ -7,6 +7,9 @@
 //     -> just compile-check a set of files (handy for the frontend loop).
 //   GET  /health
 
+// Load secrets from backend/.env if present (AWS / Supabase / Stripe keys).
+try { require("dotenv").config(); } catch (e) { /* dotenv optional */ }
+
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");

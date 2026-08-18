@@ -1,0 +1,27 @@
+# ============================================================================
+# Copy this file to  backend/.env  on the EC2 box and fill in the values.
+# (.env is gitignored — never commit real secrets.)  Restart with:
+#   cd backend && npm install && pm2 restart server --update-env
+# ============================================================================
+
+# ---- Amazon Bedrock (your AWS creds; the app calls Bedrock on users' behalf) --
+# Best practice: attach an IAM ROLE to the EC2 instance with bedrock:InvokeModel
+# and leave these two blank (the SDK picks up the role automatically). Otherwise
+# paste an IAM user's keys here.
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+
+# ---- Supabase (server-side; service_role BYPASSES RLS — keep it secret) -------
+SUPABASE_URL=https://jzkkfwurikwrztneugfu.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=
+
+# ---- Stripe (payments) -------------------------------------------------------
+STRIPE_SECRET_KEY=sk_live_or_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID=price_...          # the one-time $10 "credit pack" Price
+CREDIT_PACK_MICROS=10000000        # credits granted per pack ($10 = 10,000,000)
+
+# ---- Pricing / app -----------------------------------------------------------
+BILLING_MARKUP=1.4                 # your margin over Bedrock cost (1.4 = +40%)
+APP_URL=https://YOUR-AMPLIFY-DOMAIN   # frontend origin, for Stripe redirect back
