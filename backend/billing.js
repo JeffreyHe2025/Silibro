@@ -52,25 +52,31 @@ async function authUser(req) {
 }
 
 // ---- Balance / enforcement --------------------------------------------------
+// Full status: monthly free allowance + prepaid credits (all micros). Rolls the
+// period server-side so a new month frees the user up automatically.
+async function getStatus(userId) {
+  const { data, error } = await admin.rpc("usage_status", { p_user: userId });
+  if (error || !data) return { free_remaining_micros: 0, monthly_cap_micros: 0, period_used_micros: 0, credit_micros: 0, remaining_micros: 0 };
+  return data;
+}
+// Total spendable right now (free allowance left + prepaid credits), in micros.
 async function getBalance(userId) {
-  const { data } = await admin
-    .from("billing_accounts")
-    .select("credit_micros")
-    .eq("user_id", userId)
-    .maybeSingle();
-  return data ? Number(data.credit_micros) : 0;
+  const st = await getStatus(userId);
+  return Number(st.remaining_micros || 0);
 }
 
-// Gate a call BEFORE running it: prepaid model, so we only require a positive
-// balance (the exact cost isn't known until the tokens come back).
+// Gate a call BEFORE running it: allowed if free allowance remains OR the user
+// has prepaid credits. The exact cost isn't known until the tokens come back.
 async function assertCredits(userId) {
-  const bal = await getBalance(userId);
-  if (bal <= 0) { const e = new Error("out of credits"); e.status = 402; throw e; }
-  return bal;
+  const { data, error } = await admin.rpc("can_spend", { p_user: userId });
+  if (error) throw new Error("quota check failed: " + error.message);
+  if (data !== true) { const e = new Error("monthly free limit reached"); e.status = 402; throw e; }
+  return true;
 }
 
 // Debit for a completed call. `usage` is { inputTokens, outputTokens, model }.
-// Cost is computed with the Bedrock price table + markup. Returns new balance.
+// Draws from the free monthly allowance first, then prepaid credits. Returns the
+// remaining spendable balance (micros) for the inline badge update.
 async function chargeUsage(userId, kind, usage) {
   const { costMicros } = require("./bedrock");
   const model = (usage && usage.model) || "";
@@ -82,7 +88,7 @@ async function chargeUsage(userId, kind, usage) {
     p_user: userId, p_cost: cost, p_kind: kind, p_model: model, p_in: inTok, p_out: outTok,
   });
   if (error) throw new Error("charge failed: " + error.message);
-  return Number(data);
+  return Number((data && data.remaining_micros) || 0);
 }
 
 // Find or create the user's Stripe customer, remembering it on the account row.
@@ -104,8 +110,14 @@ const billingRouter = express.Router();
 billingRouter.get("/account", async (req, res) => {
   try {
     const userId = await authUser(req);
-    const micros = await getBalance(userId);
-    res.json({ credits: micros / 1e6, credit_micros: micros });
+    const st = await getStatus(userId);
+    res.json({
+      free_remaining: (st.free_remaining_micros || 0) / 1e6,
+      monthly_cap: (st.monthly_cap_micros || 0) / 1e6,
+      period_used: (st.period_used_micros || 0) / 1e6,
+      credits: (st.credit_micros || 0) / 1e6,
+      remaining: (st.remaining_micros || 0) / 1e6,
+    });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
@@ -179,6 +191,6 @@ const billingWebhook = [
 ];
 
 module.exports = {
-  billingReady, authUser, getBalance, assertCredits, chargeUsage,
+  billingReady, authUser, getBalance, getStatus, assertCredits, chargeUsage,
   billingRouter, billingWebhook,
 };

@@ -2402,22 +2402,37 @@
       return tok ? { Authorization: "Bearer " + tok } : {};
     } catch (e) { return {}; }
   }
-  function updateCreditsBadge(dollars) {
+  // Render the badge from the full status: monthly free allowance (+ prepaid
+  // credits when the user has topped up). Pass null to hide (guests).
+  function renderCreditsBadge(st) {
     var badge = $("credits-badge");
     if (!badge) return;
-    if (dollars == null || !isSignedIn()) { badge.classList.add("hidden"); return; }
-    badge.textContent = "Credits: $" + Number(dollars).toFixed(2);
+    if (!st || !isSignedIn()) { badge.classList.add("hidden"); return; }
+    var free = Number(st.free_remaining || 0), credits = Number(st.credits || 0);
+    var remaining = Number(st.remaining != null ? st.remaining : free + credits);
+    var text;
+    if (remaining <= 0) text = "Free limit reached";
+    else if (credits > 0) text = "Free $" + free.toFixed(2) + " + $" + credits.toFixed(2) + " credit";
+    else text = "Free: $" + free.toFixed(2) + " left this month";
+    badge.textContent = text;
+    badge.title = "Monthly free allowance: $" + free.toFixed(2) + " of $" + Number(st.monthly_cap || 0).toFixed(2) +
+      " left" + (credits > 0 ? "; prepaid credits: $" + credits.toFixed(2) : "");
     badge.classList.remove("hidden");
-    badge.classList.toggle("credits-low", Number(dollars) <= 0);
+    badge.classList.toggle("credits-low", remaining <= 0);
+  }
+  // Back-compat shim: a bare dollar number (inline updates) or null (hide).
+  function updateCreditsBadge(dollars) {
+    if (dollars == null) { renderCreditsBadge(null); return; }
+    refreshCredits(); // fetch the full free/credits breakdown for an accurate badge
   }
   async function refreshCredits() {
-    if (!isSignedIn()) { updateCreditsBadge(null); return; }
+    if (!isSignedIn()) { renderCreditsBadge(null); return; }
     try {
       var headers = await authHeaders();
       if (!headers.Authorization) return;
       var r = await fetch(getBackendUrl() + "/billing/account", { headers: headers });
       var d = await r.json();
-      if (r.ok && typeof d.credits === "number") updateCreditsBadge(d.credits);
+      if (r.ok) renderCreditsBadge(d);
     } catch (e) { /* leave badge as-is */ }
   }
   async function startTopup() {
@@ -2432,8 +2447,8 @@
   }
   // Called when a Bedrock call returns 402. Nudge the user to top up.
   function onOutOfCredits() {
-    updateCreditsBadge(0);
-    if (confirm("You're out of Bedrock credits. Add more now?")) startTopup();
+    refreshCredits();
+    if (confirm("You've used your free monthly Bedrock allowance. Add prepaid credits to keep going now (resets on the 1st)?")) startTopup();
   }
   // After returning from Stripe Checkout (?topup=success), refresh the balance.
   function handleTopupReturn() {
