@@ -8,7 +8,7 @@
 //   GET  /health
 
 // Load secrets from backend/.env if present (AWS / Supabase / Stripe keys).
-try { require("dotenv").config(); } catch (e) { /* dotenv optional */ }
+try { require("dotenv").config({ path: require("path").join(__dirname, ".env") }); } catch (e) { /* dotenv optional */ }
 
 const crypto = require("crypto");
 const express = require("express");
