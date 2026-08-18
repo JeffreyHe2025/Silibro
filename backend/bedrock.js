@@ -7,15 +7,14 @@
 //
 // Requires: npm i @aws-sdk/client-bedrock-runtime
 
-const {
-  BedrockRuntimeClient,
-  ConverseCommand,
-} = require("@aws-sdk/client-bedrock-runtime");
+let _sdk = null;
+try { _sdk = require("@aws-sdk/client-bedrock-runtime"); } catch (e) { _sdk = null; }
 
 const REGION = process.env.AWS_REGION || process.env.BEDROCK_REGION || "us-east-1";
 let _client = null;
 function client() {
-  if (!_client) _client = new BedrockRuntimeClient({ region: REGION });
+  if (!_sdk) throw new Error("Amazon Bedrock is not available: run `npm i @aws-sdk/client-bedrock-runtime` on the backend.");
+  if (!_client) _client = new _sdk.BedrockRuntimeClient({ region: REGION });
   return _client;
 }
 
@@ -94,7 +93,7 @@ async function callBedrock({ model, system, messages }) {
   };
   if (system) input.system = [{ text: system }];
 
-  const out = await client().send(new ConverseCommand(input));
+  const out = await client().send(new _sdk.ConverseCommand(input));
   const blocks = (out.output && out.output.message && out.output.message.content) || [];
   const text = blocks.map((b) => b.text || "").join("");
   const usage = {

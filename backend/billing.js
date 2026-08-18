@@ -18,12 +18,13 @@
 //
 // Requires: npm i @supabase/supabase-js stripe
 
-const { createClient } = require("@supabase/supabase-js");
+let createClient = null;
+try { createClient = require("@supabase/supabase-js").createClient; } catch (e) { createClient = null; }
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const admin =
-  SUPABASE_URL && SERVICE_KEY
+  createClient && SUPABASE_URL && SERVICE_KEY
     ? createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } })
     : null;
 
@@ -32,7 +33,8 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || "";
 const CREDIT_PACK_MICROS = parseInt(process.env.CREDIT_PACK_MICROS || "10000000", 10); // $10
 const APP_URL = process.env.APP_URL || "";
-const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
+let stripe = null;
+try { stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null; } catch (e) { stripe = null; }
 
 function billingReady() {
   return !!admin;

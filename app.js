@@ -2185,10 +2185,22 @@
         headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
         body: JSON.stringify({ spec: spec, manifest: manifest, review: review, provider: provider, key: key, builderModel: model, verifierModel: model }),
       });
+      // A non-stream response (e.g. 404 because the backend isn't updated, or a
+      // 500) won't parse as NDJSON — surface the real status instead of a blank fail.
+      if (!resp.ok) {
+        var body = await resp.text().catch(function () { return ""; });
+        var hint = resp.status === 404
+          ? " — the /refix endpoint isn't on the backend yet (run: git pull && pm2 restart server on EC2)."
+          : "";
+        bubble.textContent = "⚠ re-fix failed: HTTP " + resp.status + hint + (body ? " " + body.slice(0, 200) : "");
+        bubble.classList.add("chat-error");
+        if (resp.status === 402) onOutOfCredits();
+        return;
+      }
       var data = await readFlowStream(resp);
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
       if (!data || data.error) {
-        bubble.textContent = "⚠ " + ((data && data.error) || "re-fix failed");
+        bubble.textContent = "⚠ re-fix failed: " + ((data && data.error) || "the backend returned no result — it may be an older version without /refix (git pull && pm2 restart server).");
         bubble.classList.add("chat-error");
         if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
         return;
