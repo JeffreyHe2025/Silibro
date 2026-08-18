@@ -3246,6 +3246,45 @@
     return out.length ? out.join("\n\n") : "// (interface unavailable)";
   }
 
+  // name -> functionality summary the Builder wrote (from this session's build, else
+  // the persisted module_map.json). Gives the model WHAT a module does, not just ports.
+  function getModuleSummaries() {
+    var src = (lastFlowData && lastFlowData.manifest) || null;
+    if (!src) {
+      var mf = files.find(function (x) { return x.name === "module_map.json"; });
+      if (mf) { try { src = JSON.parse(mf.code || "[]"); } catch (e) { src = null; } }
+    }
+    var out = {};
+    (src || []).forEach(function (m) { if (m && m.name && m.summary) out[m.name] = m.summary; });
+    return out;
+  }
+  function moduleNamesIn(code) {
+    var names = [], re = /\bmodule\s+(\w+)/g, m;
+    while ((m = re.exec(code || ""))) names.push(m[1]);
+    return names;
+  }
+  // A compact "what it does" line (or two) from a module summary.
+  function summaryDescription(sum) {
+    if (!sum) return "";
+    var bits = [];
+    if (sum.intendedFunction) bits.push("Function: " + sum.intendedFunction);
+    var cr = sum.clockReset;
+    if (cr && (cr.clockTrigger || cr.resetType)) {
+      var reset = cr.resetType ? (cr.resetType + " reset" + (cr.resetTrigger ? " (" + cr.resetTrigger + ")" : "")) : "";
+      bits.push("Clock/reset: " + [cr.clockTrigger, reset].filter(Boolean).join(", "));
+    }
+    return bits.join("; ");
+  }
+  // The functionality description(s) for the module(s) a file defines, as comment lines.
+  function fileFunctionality(f, summaries) {
+    var descs = [];
+    moduleNamesIn(f.code).forEach(function (n) {
+      var d = summaryDescription(summaries[n]);
+      if (d) descs.push("// " + (moduleNamesIn(f.code).length > 1 ? n + " — " : "") + d);
+    });
+    return descs.join("\n");
+  }
+
   // Decide whether a file is sent in FULL this message, or just as an index.
   // Full: specs, the open file, small files, and anything CHANGED since last full send.
   function shouldSendFull(f) {
@@ -3259,6 +3298,7 @@
 
   function buildProjectContext() {
     syncCurrentFileFromEditor(); // include unsaved edits of the open file
+    var moduleSummaries = getModuleSummaries(); // functionality descriptions from the build
     var lines = [
       "You are an AI assistant embedded in a Verilog IDE. You can read and edit the files of the user's currently selected project.",
       "SCOPE: You ONLY help with DIGITAL HARDWARE design in Verilog/SystemVerilog (RTL modules, FSMs, datapaths, arithmetic, memories, interfaces, testbenches, synthesis). If the user asks you to build or write anything that is NOT digital hardware — software apps, web/mobile code, scripts, essays, general questions, math homework, images, etc. — do NOT build it and do NOT create/edit any non-hardware files. Politely decline in one or two sentences and redirect them to describe a hardware / Verilog design instead.",
@@ -3277,8 +3317,10 @@
           lines.push("--- " + (f.name || "untitled.v") + " ---");
           lines.push(f.code || "");
         } else if (isVerilogName(f.name)) {
-          lines.push("--- " + f.name + " (interface only — unchanged) ---");
+          lines.push("--- " + f.name + " (interface + function — unchanged) ---");
           lines.push(extractInterface(f.code));
+          var fn = fileFunctionality(f, moduleSummaries);
+          if (fn) lines.push(fn);
           indexed++;
         } else {
           lines.push("--- " + f.name + " (unchanged, " + (f.code || "").length + " chars, body omitted) ---");
@@ -3287,7 +3329,7 @@
       });
       if (indexed) {
         lines.push("");
-        lines.push("NOTE: Files marked '(interface only)'/'(body omitted)' are UNCHANGED — only their interface is shown to save space. If you need the FULL body of one (or more) before you can proceed, reply with a SINGLE line exactly: 'NEED: <filename>[, <filename>...]' and nothing else; the full files will be provided and you can continue. To edit a file, output its full ```file:<name>``` block.");
+        lines.push("NOTE: Files marked '(interface + function)'/'(body omitted)' are UNCHANGED — you are shown their interface (ports) and a one-line description of what each module does, but not the full body, to save space. If you need to READ or REWRITE the full body of such a module before you can proceed, reply with a SINGLE line exactly: 'NEED: <filename>[, <filename>...]' and nothing else; the full files will be provided and you can continue. NEVER rewrite a module from its interface/description alone — always NEED its full body first, then output the full ```file:<name>``` block.");
       }
     }
     lines.push("");
