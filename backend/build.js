@@ -50,10 +50,20 @@ async function planGraph(llm, spec) {
   const sys =
     "You are a Verilog design planner. Decompose the request into synthesizable modules. " +
     "If the request is NOT a digital-hardware / Verilog design (e.g. software, scripts, essays, " +
-    'general questions), return exactly {"modules":[]} and nothing else. ' +
-    'Otherwise return ONLY JSON in this shape, no prose: ' +
+    'general questions), return exactly {"modules":[]} and nothing else.\n' +
+    "DECOMPOSITION RULES (for readable, maintainable RTL):\n" +
+    "- Give each module ONE clear responsibility. If a module's purpose needs the word 'and', split it.\n" +
+    "- Separate the datapath from the control (put an FSM/controller in its own module).\n" +
+    "- Factor reusable or repeated blocks (adders, ALUs, counters, registers, FIFOs, decoders, muxes, " +
+    "shift registers, memories) into their own modules and instantiate them via dependsOn.\n" +
+    "- Build a HIERARCHY: a top module that wires together smaller submodules, each small enough to read " +
+    "at a glance. Prefer composing submodules over one large module.\n" +
+    "- Match granularity to complexity: a trivial design (e.g. a single counter) can be one module; a " +
+    "complex design MUST be broken into several small modules — do NOT emit one monolithic module for it.\n" +
+    'Return ONLY JSON in this shape, no prose: ' +
     '{"modules":[{"name":"<verilog_module_name>","purpose":"<one line>","dependsOn":["<names of modules in this list it directly instantiates>"]}]} ' +
-    "Leaf modules have an empty dependsOn. Do NOT include testbenches.";
+    "Leaf modules have an empty dependsOn; the top module depends on the submodules it instantiates. " +
+    "Do NOT include testbenches.";
   const reply = await callLLM({
     ...llm,
     system: sys,
