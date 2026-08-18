@@ -595,7 +595,7 @@ body.chat-docked #chat-expand { display: none; }
   justify-content: space-between;
   gap: 8px;
 }
-#chat-history-new { text-transform: none; letter-spacing: normal; }
+#chat-history-new { text-transform: none; letter-spacing: normal; color: #6b7280 !important; }
 .chat-history-list {
   list-style: none;
   margin: 0;
