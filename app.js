@@ -48,6 +48,7 @@
   var chatModelCurrent = $("chat-model-current");
   var chatModelList = $("chat-model-list");
   var chatNew = $("chat-new");
+  var chatHistoryNew = $("chat-history-new");
   var chatHistoryBtn = $("chat-history");
   var chatHistoryView = $("chat-history-view");
   var chatHistoryList = $("chat-history-list");
@@ -3432,6 +3433,7 @@
   chatToggle.addEventListener("click", openChat);
   chatClose.addEventListener("click", closeChat);
   chatNew.addEventListener("click", newChat);
+  if (chatHistoryNew) chatHistoryNew.addEventListener("click", newChat);
   chatHistoryBtn.addEventListener("click", function () {
     if (chatHistoryView.classList.contains("hidden")) showHistory();
     else showConversation();
