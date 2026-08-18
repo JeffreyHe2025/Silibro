@@ -1889,11 +1889,12 @@
       }
       // final-attempt failure is reported by the 'built' event below
     } else if (ev.type === "conformance") {
+      var confWhere = ev.phase === "final" ? " (final review)" : "";
       if (ev.ok === false) {
-        consoleLog("⚠ " + ev.module + ": Verifier found a SPEC violation — sending back to the Builder to fix" +
+        consoleLog("⚠ " + ev.module + ": Verifier found a SPEC violation" + confWhere + " — sending back to the Builder to fix" +
           (ev.issues ? " (" + String(ev.issues).split("\n")[0].slice(0, 120) + ")" : ""), "warn");
       } else {
-        consoleLog("✓ " + ev.module + ": conforms to the spec", "ok");
+        consoleLog("✓ " + ev.module + ": conforms to the spec" + confWhere, "ok");
       }
     } else if (ev.type === "budgetWarn") {
       consoleLog("⚠ heads up: verification/correction has passed " + (ev.threshold || 20) +

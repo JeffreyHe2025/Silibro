@@ -667,6 +667,61 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
 }
 
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
+// Holistic conformance review: the Verifier judges EVERY built module at once,
+// from all summaries + the spec, and returns a per-module verdict. Seeing the whole
+// design together catches spec violations the one-module-at-a-time check can miss
+// (e.g. a reset style that only reads as wrong against the spec's global rules).
+async function reviewAllConformance(llm, spec, summaries) {
+  const sys =
+    "You are the Verifier. Given the design spec and a STRUCTURED SUMMARY for each built module " +
+    "(interface, intended function, clock/reset conventions — NOT the source code), decide for EACH " +
+    "module whether it CONFORMS to the spec. Check ports/widths, intended behavior, and ESPECIALLY the " +
+    "clock/reset style (synchronous vs asynchronous, active-high vs active-low). Return ONLY JSON: " +
+    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: the specific violations to fix; else empty>"}]}';
+  const user =
+    "Design spec:\n" + spec + "\n\nModule summaries:\n\n" +
+    summaries.map((x) => "```json\n" + JSON.stringify(x, null, 2) + "\n```").join("\n\n");
+  try {
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const t = reply.replace(/```json|```/g, "");
+    const obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
+    return Array.isArray(obj.modules)
+      ? obj.modules.map((m) => ({ module: String((m && m.module) || ""), conforms: m && m.conforms === true, issues: String((m && m.issues) || "") }))
+      : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// FINAL CONFORMANCE SWEEP: run the holistic review, then loop any flagged module
+// back to the Builder to FIX (re-summarize + re-check once) — so a violation the
+// per-module pass missed is corrected, not just reported at the end. Charged to the
+// same fix budget, so the op-count policy still governs it.
+async function finalConformanceSweep(ctx) {
+  const { llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget } = ctx;
+  if (!summaries.length) return;
+  const verdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  for (const v of verdicts) {
+    if (!v || v.conforms || !v.module || !builtFiles[v.module]) continue; // only real, fixable violations
+    const info = manifestByName[v.module] || {};
+    const mod = { name: v.module, purpose: info.purpose || "", dependsOn: info.dependsOn || [] };
+    chargeBudget(fixBudget);
+    if (onProgress) onProgress({ type: "conformance", module: v.module, ok: false, issues: v.issues, phase: "final" });
+    const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, v.issues);
+    if (!fixed) { if (onProgress) onProgress({ type: "conformance", module: v.module, ok: false, issues: v.issues, phase: "final" }); continue; }
+    builtFiles[v.module] = fixed;
+    const rr = results.find((x) => x && x.name === v.module);
+    if (rr) rr.code = fixed;
+    const newSummary = await summarizeModule(llm, mod, fixed);
+    const idx = summaries.findIndex((x) => x && x.module === v.module);
+    if (idx >= 0) summaries[idx] = newSummary; // so the displayed final review reflects the fix
+    const recheck = await checkConformance(verifierLLM, spec, mod, newSummary);
+    const ok = !recheck || recheck.conforms;
+    if (manifestByName[v.module]) manifestByName[v.module].conformance = { ok, issues: ok ? "" : (recheck && recheck.issues) || v.issues };
+    if (onProgress) onProgress({ type: "conformance", module: v.module, ok, phase: "final" });
+  }
+}
+
 // llm = the BUILDER (writes/fixes code). verifierLLM = the VERIFIER (writes the
 // functional oracle testbench + reviews spec conformance) — a DIFFERENT model, so
 // the oracle is independent of the code it checks. Falls back to the builder LLM
@@ -738,18 +793,26 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
       // module's summary against the spec (ports, behavior, and especially
       // clock/reset style) AS IT IS BUILT — and any violation is sent straight
       // back to the Builder to fix, instead of only being reported at the end.
-      for (let cround = 1; !stopTests && cround <= 2; cround++) {
-        const conf = await checkConformance(verifierLLM, spec, mod, summary); // Verifier reviews
-        if (!conf || conf.conforms) break; // conforms, or inconclusive
-        chargeBudget(fixBudget);
-        if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
-        const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, conf.issues);
-        if (!fixed) break;
-        builtFiles[mod.name] = fixed;
-        r.code = fixed;
-        summary = await summarizeModule(llm, mod, fixed); // re-describe the corrected module
+      let conformed = true, confIssues = "";
+      if (!stopTests) {
+        for (let cround = 1; cround <= 2; cround++) {
+          let conf = await checkConformance(verifierLLM, spec, mod, summary); // Verifier reviews
+          if (!conf) conf = await checkConformance(verifierLLM, spec, mod, summary); // retry once on inconclusive
+          if (!conf) break;                       // still inconclusive — don't force a rewrite
+          if (conf.conforms) { conformed = true; confIssues = ""; break; }
+          conformed = false; confIssues = conf.issues; // a real violation stands until fixed
+          chargeBudget(fixBudget);
+          if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: false, issues: conf.issues });
+          const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, conf.issues);
+          if (!fixed) break;
+          builtFiles[mod.name] = fixed;
+          r.code = fixed;
+          summary = await summarizeModule(llm, mod, fixed); // re-describe the corrected module
+        }
+        // Report the HONEST result — only ✓ if it actually conforms after the rounds.
+        if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: conformed, issues: conformed ? "" : confIssues });
       }
-      if (onProgress) onProgress({ type: "conformance", module: mod.name, ok: true });
+      if (entry) entry.conformance = stopTests ? null : { ok: conformed, issues: confIssues };
 
       summaries.push(summary);
 
@@ -882,6 +945,13 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
     });
     entry.effectiveComplexity = Math.round(eff * 10) / 10;
     entry.complexityDeps = added; // not-yet-functionally-verified children that contributed
+  }
+
+  // Final safety net: one holistic conformance review over all modules, looping
+  // any flagged violation back to the Builder to fix (skipped if the user chose
+  // "build only" at the budget prompt).
+  if (!stopTests) {
+    await finalConformanceSweep({ llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget });
   }
 
   return {
