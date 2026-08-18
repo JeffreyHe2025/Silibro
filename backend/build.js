@@ -392,6 +392,16 @@ async function checkConformance(llm, spec, mod, summary) {
 
 // Rebuild a module to fix SPEC VIOLATIONS the Verifier found; compile-checked.
 // Returns corrected code or null.
+// Deterministic async->sync reset transform: drop the reset edge from an always
+// sensitivity list, e.g. "@(posedge clk or negedge rst_n)" -> "@(posedge clk)".
+// The "if (!rst_n) ..." logic already inside the block then acts as a SYNCHRONOUS
+// reset. Leaves already-sync code and non-reset signals untouched.
+function stripAsyncReset(code) {
+  return String(code)
+    .replace(/(@\s*\(\s*(?:pos|neg)edge\s+\w+)\s+or\s+(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(\))/gi, "$1$2")
+    .replace(/@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s+or\s+((?:pos|neg)edge\s+\w+)\s*\)/gi, "@($1)");
+}
+
 async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
   const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
   const depContext = depNames
@@ -408,6 +418,23 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
     "\n\nReturn a corrected version of '" + mod.name + "' that conforms to the spec.";
   if (depContext)
     base += "\n\nIt instantiates these already-built modules (do NOT redefine them):\n\n" + depContext;
+
+  // Fast path: a synchronous-reset requirement against async-reset code is a
+  // mechanical edit — strip the reset from the sensitivity list, compile-check it,
+  // and return WITHOUT spending an LLM call. \bsynchronous\b won't match the
+  // "asynchronous" in the same sentence, so this only fires when the SPEC wants sync.
+  if (/\bsynchronous\b/i.test(issues || "")) {
+    const cur = builtFiles[mod.name] || "";
+    const stripped = stripAsyncReset(cur);
+    if (stripped && stripped !== cur) {
+      const files = Object.keys(builtFiles).filter((n) => n !== mod.name)
+        .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+      files.push({ name: mod.name + ".v", code: stripped });
+      const res = await compileVerilog(files, mod.name);
+      if (res.ok) return stripped; // deterministic one-pass sync-reset fix
+    }
+  }
+
   let lastErr = "";
   for (let attempt = 1; attempt <= 3; attempt++) {
     const user = base + (lastErr ? "\n\nYour previous attempt failed to COMPILE:\n" + lastErr + "\n\nReturn a corrected, compiling version." : "");
