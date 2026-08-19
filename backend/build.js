@@ -232,7 +232,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
 
   let lastErr = "";
   for (let attempt = 1; attempt <= maxTries; attempt++) {
-    const sys = header ?
+    const sys = (header ?
       ("You are a Verilog module writer. You are given the EXACT module header (name, parameters, ports) — " +
        "you MUST reproduce it VERBATIM and NOT change any parameter or port. Write ONLY the module BODY (the " +
        "internal logic) between the header and 'endmodule'. Match the spec's behavior, clock edge, and reset " +
@@ -252,7 +252,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "the sensitivity list (e.g. 'always @(posedge clk or negedge rst_n)'). Match active-high vs active-low.\n" +
       "- The behavior, parameters, and edge cases the spec describes for THIS module.\n" +
       "Re-read this module's section of the spec, then implement it precisely. Output ONLY the module inside a " +
-      "```verilog code block — no prose, no testbench.");
+      "```verilog code block — no prose, no testbench.")) + RESET_REF;
     let user =
       "Design spec:\n" +
       builderSpec(spec, mod.name) +
@@ -393,6 +393,23 @@ const FLOOR_CUTOFF = parseInt(process.env.FLOOR_CUTOFF, 10) || 22;
 // Low temperature for the BUILDER LLM (any model) — steadier instruction-following.
 // The Verifier keeps its default temperature. Configurable via BUILDER_TEMPERATURE.
 const BUILDER_TEMP = process.env.BUILDER_TEMPERATURE != null ? parseFloat(process.env.BUILDER_TEMPERATURE) : 0.2;
+
+// Reset few-shot: show BOTH correct patterns and the specific wrong one, so the
+// model matches the spec's reset type instead of defaulting to asynchronous.
+const RESET_REF =
+  "\n\nRESET STYLE \u2014 match the spec EXACTLY (this is the most common mistake). Examples:\n" +
+  "  SYNCHRONOUS reset (reset is NOT in the sensitivity list):\n" +
+  "    always @(posedge clk) begin\n" +
+  "      if (!rst_n) q <= '0;   // active-low reset checked INSIDE the block\n" +
+  "      else        q <= d;\n" +
+  "    end\n" +
+  "  ASYNCHRONOUS reset (the reset edge IS in the sensitivity list):\n" +
+  "    always @(posedge clk or negedge rst_n) begin\n" +
+  "      if (!rst_n) q <= '0; else q <= d;\n" +
+  "    end\n" +
+  "  WRONG: writing 'always @(posedge clk or negedge rst_n)' when the spec asks for a SYNCHRONOUS reset. " +
+  "Do NOT default to asynchronous \u2014 use exactly the reset TYPE the spec states, and match active-low " +
+  "(rst_n / !rst_n) vs active-high polarity.";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
