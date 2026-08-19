@@ -1113,7 +1113,12 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       // DETERMINISTIC RESET FIX (no LLM): if the spec requires a SYNCHRONOUS reset
       // but the Builder wrote an ASYNCHRONOUS one, strip the reset from the always
       // sensitivity list in code — before any conformance LLM call sees it.
-      if (contract && contract.reset && /^sync/i.test(contract.reset.type || "") && hasAsyncReset(r.code)) {
+      // Requirement is read from BOTH the contract AND the spec text (\bsynchronous\b
+      // doesn't match "asynchronous"), so it works even if the LLM contract omits reset.
+      const wantsSyncReset =
+        (contract && contract.reset && /^sync/i.test(contract.reset.type || "")) ||
+        /\bsynchronous\b/i.test(builderSpec(spec, mod.name));
+      if (wantsSyncReset && hasAsyncReset(r.code)) {
         const fixedCode = stripAsyncReset(r.code);
         if (fixedCode !== r.code) {
           const chkFiles = Object.keys(builtFiles).filter((n) => n !== mod.name)
