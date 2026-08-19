@@ -182,8 +182,11 @@ async function getGraph() {
       "SUMMARY (port list, parameters, intended function, clock/reset conventions). You do NOT see the " +
       "source code — by design — so judge only from these summaries against the spec. For EACH module, " +
       "state whether it matches the spec's intent, ports, parameters, and clock/reset requirements. " +
-      "Flag any mismatch, missing port, or wrong reset style specifically. Be concise. Output Markdown " +
-      "with one section per module and a final one-line overall verdict.";
+      "Flag any mismatch, missing port, or wrong reset style specifically.\n" +
+      "Module NAMES are assigned by the design plan and may differ from the names used in the spec (the " +
+      "design is split into sub-modules) — do NOT flag a module's name as a mismatch; judge only ports, " +
+      "parameters, behavior, and reset. Be concise. Output Markdown with one section per module and a " +
+      "final one-line overall verdict.";
     const manifest = state.manifest || [];
     const statusRef = manifest.length
       ? "\n\nMODULE STATUS (reference — the full module list):\n" +

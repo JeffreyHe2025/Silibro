@@ -48,18 +48,16 @@ function topoSort(modules) {
 // Step 1: LLM decomposes the spec into modules + dependencies.
 async function planGraph(llm, spec) {
   const sys =
-    "You are a Verilog design planner. Decompose the request into synthesizable modules. " +
-    "If the request is NOT a digital-hardware / Verilog design (e.g. software, scripts, essays, " +
-    'general questions), return exactly {"modules":[]} and nothing else.\n' +
-    "DECOMPOSITION RULES (for readable, maintainable RTL):\n" +
-    "- Give each module ONE clear responsibility. If a module's purpose needs the word 'and', split it.\n" +
-    "- Separate the datapath from the control (put an FSM/controller in its own module).\n" +
-    "- Factor reusable or repeated blocks (adders, ALUs, counters, registers, FIFOs, decoders, muxes, " +
-    "shift registers, memories) into their own modules and instantiate them via dependsOn.\n" +
-    "- Build a HIERARCHY: a top module that wires together smaller submodules, each small enough to read " +
-    "at a glance. Prefer composing submodules over one large module.\n" +
-    "- Match granularity to complexity: a trivial design (e.g. a single counter) can be one module; a " +
-    "complex design MUST be broken into several small modules — do NOT emit one monolithic module for it.\n" +
+    "You are a Verilog design planner. The design specification is ORGANIZED BY MODULE: it has one " +
+    "'## <module_name>' section per module (plus a '## Overview'). Return the module dependency graph using " +
+    "EXACTLY those modules — the SAME names and the SAME set. Do NOT invent, rename, merge, or split modules, " +
+    "and do NOT add a module the spec doesn't define. The module names you return MUST match the spec's " +
+    "'## <module_name>' headings verbatim. For each module, set dependsOn to the other listed modules it " +
+    "directly instantiates.\n" +
+    "If the request is NOT a digital-hardware / Verilog design (software, scripts, essays, general " +
+    'questions), return exactly {"modules":[]} and nothing else.\n' +
+    "ONLY IF the spec is NOT organized into '## <module>' sections: decompose it yourself into small " +
+    "single-responsibility modules (separate datapath from control, factor out reusable blocks).\n" +
     'Return ONLY JSON in this shape, no prose: ' +
     '{"modules":[{"name":"<verilog_module_name>","purpose":"<one line>","dependsOn":["<names of modules in this list it directly instantiates>"]}]} ' +
     "Leaf modules have an empty dependsOn; the top module depends on the submodules it instantiates. " +
@@ -541,13 +539,19 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
 // active level) against the spec. Returns { conforms:bool, issues } or null.
 async function checkConformance(llm, spec, mod, summary) {
   const sys =
-    "You are the Verifier. Given the design spec and ONE module's summary (interface, intended " +
-    "function, and clock/reset conventions), decide whether the module CONFORMS to the spec. Check " +
-    "ports/widths, intended behavior, and ESPECIALLY the clock/reset style (synchronous vs " +
-    "asynchronous, active-high vs active-low). Return ONLY JSON: " +
-    '{"conforms": true|false, "issues": "<if false: the specific violations the Builder must fix; else empty>"}';
+    "You are the Verifier. You are given the relevant design-spec section and ONE module's summary " +
+    "(interface, intended function, clock/reset). Decide whether the module CONFORMS to what the spec " +
+    "requires for THIS module. Check ports/widths, intended behavior, and the clock/reset style " +
+    "(synchronous vs asynchronous, active-high vs active-low).\n" +
+    "CRITICAL: The module's NAME is assigned by the design plan and MAY differ from names used in the spec " +
+    "(a design is split into sub-modules with their own names). Do NOT flag the module name as a violation " +
+    "and NEVER ask to rename it — the Builder cannot and must not change the module name. Judge ONLY the " +
+    "ports, behavior, and reset. Return ONLY JSON: " +
+    '{"conforms": true|false, "issues": "<if false: the specific PORT/BEHAVIOR/RESET violations the Builder must fix; else empty>"}';
   const user =
-    "Design spec:\n" + spec + "\n\nModule '" + mod.name + "' summary:\n" + JSON.stringify(summary, null, 2);
+    "Design spec (this module's section):\n" + builderSpec(spec, mod.name) +
+    "\n\nModule '" + mod.name + "'" + (mod.purpose ? " \u2014 " + mod.purpose : "") +
+    " summary:\n" + JSON.stringify(summary, null, 2);
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
     const s = reply.replace(/```json|```/g, "");
@@ -876,9 +880,12 @@ async function reviewAllConformance(llm, spec, summaries) {
   const sys =
     "You are the Verifier. Given the design spec and a STRUCTURED SUMMARY for each built module " +
     "(interface, intended function, clock/reset conventions — NOT the source code), decide for EACH " +
-    "module whether it CONFORMS to the spec. Check ports/widths, intended behavior, and ESPECIALLY the " +
-    "clock/reset style (synchronous vs asynchronous, active-high vs active-low). Return ONLY JSON: " +
-    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: the specific violations to fix; else empty>"}]}';
+    "module whether it CONFORMS to the spec. Check ports/widths, intended behavior, and the clock/reset " +
+    "style (synchronous vs asynchronous, active-high vs active-low).\n" +
+    "Module NAMES are assigned by the design plan and may differ from names in the spec (the design is " +
+    "split into sub-modules). Do NOT flag module names as violations and never ask to rename — judge ONLY " +
+    "ports, behavior, and reset. Return ONLY JSON: " +
+    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: the specific PORT/BEHAVIOR/RESET violations to fix; else empty>"}]}';
   const user =
     "Design spec:\n" + spec + "\n\nModule summaries:\n\n" +
     summaries.map((x) => "```json\n" + JSON.stringify(x, null, 2) + "\n```").join("\n\n");
