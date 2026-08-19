@@ -546,8 +546,18 @@ async function checkConformance(llm, spec, mod, summary) {
     "CRITICAL: The module's NAME is assigned by the design plan and MAY differ from names used in the spec " +
     "(a design is split into sub-modules with their own names). Do NOT flag the module name as a violation " +
     "and NEVER ask to rename it — the Builder cannot and must not change the module name. Judge ONLY the " +
-    "ports, behavior, and reset. Return ONLY JSON: " +
-    '{"conforms": true|false, "issues": "<if false: the specific PORT/BEHAVIOR/RESET violations the Builder must fix; else empty>"}';
+    "ports, behavior, and reset.\n" +
+    "When it does NOT conform, do NOT merely state what is wrong — write EXPLICIT, ACTIONABLE HOW-TO-FIX " +
+    "instructions the Builder can apply directly in Verilog. For EACH violation give the exact edit, e.g.:\n" +
+    "  - reset: 'The reset is asynchronous; change `always @(posedge clk or negedge rst_n)` to " +
+    "`always @(posedge clk)` and keep the `if (!rst_n) ...` reset assignment INSIDE the block so it is " +
+    "synchronous.'\n" +
+    "  - port width: 'Change `output reg [7:0] dout` to `output reg [DATA_WIDTH-1:0] dout` and use the " +
+    "DATA_WIDTH parameter.'\n" +
+    "  - missing/extra port: 'Add `input wire en` to the port list and gate the update with it' / 'Remove " +
+    "the `init` port; it is not in this module's interface.'\n" +
+    "Return ONLY JSON: " +
+    '{"conforms": true|false, "issues": "<if false: numbered EXPLICIT how-to-fix instructions with the exact Verilog edits; else empty>"}';
   const user =
     "Design spec (this module's section):\n" + builderSpec(spec, mod.name) +
     "\n\nModule '" + mod.name + "'" + (mod.purpose ? " \u2014 " + mod.purpose : "") +
@@ -886,8 +896,11 @@ async function reviewAllConformance(llm, spec, summaries) {
     "style (synchronous vs asynchronous, active-high vs active-low).\n" +
     "Module NAMES are assigned by the design plan and may differ from names in the spec (the design is " +
     "split into sub-modules). Do NOT flag module names as violations and never ask to rename — judge ONLY " +
-    "ports, behavior, and reset. Return ONLY JSON: " +
-    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: the specific PORT/BEHAVIOR/RESET violations to fix; else empty>"}]}';
+    "ports, behavior, and reset.\n" +
+    "For every non-conforming module, write EXPLICIT, ACTIONABLE how-to-fix instructions with the exact " +
+    "Verilog edits (e.g. 'change `always @(posedge clk or negedge rst_n)` to `always @(posedge clk)` keeping " +
+    "the `if(!rst_n)` reset inside — makes it synchronous'), not just what is wrong. Return ONLY JSON: " +
+    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: numbered explicit how-to-fix instructions with exact edits; else empty>"}]}';
   const user =
     "Design spec:\n" + spec + "\n\nModule summaries:\n\n" +
     summaries.map((x) => "```json\n" + JSON.stringify(x, null, 2) + "\n```").join("\n\n");
