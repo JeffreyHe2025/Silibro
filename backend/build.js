@@ -125,7 +125,17 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
     const sys =
       "You are a Verilog module writer. Write exactly ONE synthesizable Verilog module named '" +
       mod.name +
-      "'. Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
+      "' that EXACTLY matches the design specification.\n" +
+      "STRICT SPEC ADHERENCE — a mismatch with the spec is treated as an error and sent back to you, so get " +
+      "these right the FIRST time:\n" +
+      "- Port names, directions, and bit-widths exactly as the spec states.\n" +
+      "- Clock edge (posedge vs negedge) as specified.\n" +
+      "- Reset TYPE and POLARITY exactly. For a SYNCHRONOUS reset, sample it INSIDE 'always @(posedge clk)' " +
+      "and do NOT put the reset in the sensitivity list. For an ASYNCHRONOUS reset, include the reset edge in " +
+      "the sensitivity list (e.g. 'always @(posedge clk or negedge rst_n)'). Match active-high vs active-low.\n" +
+      "- The behavior, parameters, and edge cases the spec describes for THIS module.\n" +
+      "Re-read this module's section of the spec, then implement it precisely. Output ONLY the module inside a " +
+      "```verilog code block — no prose, no testbench.";
     let user =
       "Design spec:\n" +
       spec +
