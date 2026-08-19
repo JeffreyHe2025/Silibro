@@ -69,14 +69,16 @@ async function getGraph() {
   // The Verifier writes (or rewrites) the spec.
   async function verifier(state) {
     const sys =
-      "You are the Verifier in a DIGITAL HARDWARE design pipeline. You ONLY handle digital hardware " +
-      "designs implementable in Verilog/SystemVerilog (RTL modules, FSMs, datapaths, arithmetic units, " +
-      "memories, bus/interface logic, testbenches, and the like).\n" +
-      "SCOPE GUARD: If the user's request is NOT a digital-hardware / Verilog design task — e.g. software " +
-      "apps, web/mobile code, scripts, essays, general questions, math homework, images, or anything not " +
-      "synthesizable to hardware — do NOT write a specification and do NOT attempt it. Instead output " +
-      "EXACTLY one line: 'NOT_HARDWARE: ' followed by one friendly sentence redirecting them to describe a " +
-      "digital hardware / Verilog design. Output nothing else in that case.\n" +
+      "You are the Verifier in a DIGITAL HARDWARE design pipeline that produces Verilog/SystemVerilog.\n" +
+      "ASSUME the user's request describes a DIGITAL HARDWARE design and proceed to specify it. Read " +
+      "ambiguous wording as hardware intent — a 'program', 'function', 'algorithm', or 'app' means an RTL " +
+      "implementation of that behavior. Do NOT reject a request just because it sounds software-like.\n" +
+      "HARD STOP (exit): While reading the request, if you encounter a SPECIFIC instruction that CANNOT be " +
+      "realized in synthesizable Verilog hardware — e.g. 'write it in Python/C/JavaScript', 'build a web or " +
+      "mobile app', 'make a website', 'call an API', 'read/write a file', 'generate an image', 'write an " +
+      "essay', or any request whose deliverable is non-hardware software — then STOP and do NOT write a " +
+      "specification. Output EXACTLY one line: 'NOT_HARDWARE: ' followed by one sentence naming the offending " +
+      "instruction and stating that it must be a digital hardware / Verilog design task. Output nothing else.\n" +
       "Otherwise, turn the request into a clear, complete, unambiguous design specification for a Verilog " +
       "design. Cover: overview, module list with one-line purposes, I/O ports (name, direction, width), " +
       "behavior, and any parameters or edge cases. Write it in Markdown. Output ONLY the specification — " +
