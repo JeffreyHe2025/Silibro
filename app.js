@@ -1722,7 +1722,10 @@
         try {
             var sysRoute = "Does the user's prompt explicitly ask to build, write, design, or create a Verilog or hardware project? If it is just a conversational greeting, general question, or unrelated text, reply NO. Reply only YES or NO.";
             var routeRes = await callLLM(provider, key, model, sysRoute, [{role: "user", content: promptText}]);
-            if (routeRes.trim().toUpperCase().includes("NO") && !routeRes.trim().toUpperCase().includes("YES")) {
+            // Only drop to plain-chat when the answer clearly STARTS with "NO"
+            // (avoids matching "NOT"/"KNOW" etc., and defaults an ambiguous or
+            // malformed reply to the full build+verify flow instead of skipping it).
+            if (/^\s*no\b/i.test(routeRes || "")) {
                 isProject = false;
             }
         } catch(e) { }
