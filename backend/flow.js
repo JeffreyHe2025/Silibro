@@ -84,9 +84,12 @@ async function getGraph() {
       "'read/write a file', 'generate an image', 'write an essay', etc. — name the offending instruction " +
       "and state it must be a digital hardware / Verilog design task.\n" +
       "Otherwise, turn the request into a clear, complete, unambiguous design specification for a Verilog " +
-      "design. Cover: overview, module list with one-line purposes, I/O ports (name, direction, width), " +
-      "behavior, and any parameters or edge cases. Write it in Markdown. Output ONLY the specification — " +
-      "no preamble, no code.";
+      "design, ORGANIZED BY MODULE. Start with a '# <Design Name>' title and a one-paragraph Overview. Then, " +
+      "for EACH module, write a '## <module_name>' section that contains EVERYTHING belonging to that module: " +
+      "Purpose (one line), I/O Ports (name, direction, width), Parameters, Behavior, and Edge Cases. Keep each " +
+      "module's behavior and edge cases INSIDE that module's section — do NOT create separate global " +
+      "'Behavior' or 'Edge Cases' sections, so everything about one module is in one place. Write it in " +
+      "Markdown. Output ONLY the specification — no preamble, no code.";
     let user = "User request:\n" + state.prompt;
     if (state.feedback) {
       user +=
