@@ -1167,11 +1167,14 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       //   Only 'functional' counts as trusted for pruning / fault isolation.
       if (entry) {
         const floorFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+        if (onProgress) onProgress({ type: "verifyStart", module: mod.name, tier: tier });
 
         // STRUCTURAL checks on EVERY module (both tiers) — lint + GENERIC SYNTHESIS.
         // Synthesizability is universal, so it runs for all built modules. $0, local.
         const lint = await lintVerilog(floorFiles, mod.name);
+        if (onProgress) onProgress({ type: "check", module: mod.name, name: "lint", ok: lint.clean === true, reason: lint.output ? String(lint.output).split("\n")[0] : "" });
         const synth = await synthCheck(floorFiles, mod.name);
+        if (onProgress) onProgress({ type: "check", module: mod.name, name: "synth", synthesizable: synth.synthesizable, available: synth.available, reason: synth.output ? String(synth.output).split("\n")[0] : "" });
         entry.lintClean = lint.clean;
         entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
         entry.synthesizable = synth.synthesizable; // true | false | null (yosys absent)
@@ -1186,6 +1189,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         // runs clean" signal used to attribute functional failures (module vs
         // testbench). For smoke-tier modules it's also the verification gate.
         const smoke = await runSmokeBaseline(r.code, floorFiles);
+        if (onProgress) onProgress({ type: "check", module: mod.name, name: "smoke", passed: smoke.passed, reason: smoke.markers || "", tier: tier });
         entry.smokeSimPassed = smoke.passed;
         entry.smokeSimOutput = smoke.markers;
         entry.smokeTb = smoke.tb || "";  // code-generated smoke testbench (for the Modules view)

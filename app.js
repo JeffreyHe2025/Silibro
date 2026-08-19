@@ -2049,55 +2049,33 @@
       consoleLog("→ " + msg, "info");
     } else if (ev.type === "summary") {
       consoleLog("📝 " + ev.module + ": described for the Verifier (ports, params, function, clock/reset)", "info");
-    } else if (ev.type === "floor") {
+    } else if (ev.type === "verifyStart") {
       consoleLog("🧪 " + ev.module + " — " + ev.tier + " tier checks:", "info");
-      // Lint (all modules)
-      if (ev.lintClean) {
-        consoleLog("   • lint: clean ✓", "ok");
-      } else {
-        consoleLog("   • lint: issues ✗" + (ev.lintReason ? " — " + ev.lintReason : ""), "error");
+    } else if (ev.type === "check") {
+      if (ev.name === "lint") {
+        if (ev.ok) consoleLog("   • lint: clean ✓", "ok");
+        else consoleLog("   • lint: issues ✗" + (ev.reason ? " — " + ev.reason : ""), "error");
+      } else if (ev.name === "synth") {
+        if (ev.available === false) consoleLog("   • synthesis: skipped (yosys not installed) — sim-only scan still ran", "warn");
+        else if (ev.synthesizable === true) consoleLog("   • synthesis: synthesizable ✓", "ok");
+        else if (ev.synthesizable === false) consoleLog("   • synthesis: NOT synthesizable ✗" + (ev.reason ? " — " + ev.reason : ""), "error");
+        else consoleLog("   • synthesis: inconclusive", "warn");
+      } else if (ev.name === "smoke") {
+        var slbl = ev.tier === "smoke" ? "smoke testbench" : "smoke baseline";
+        if (ev.passed === true) consoleLog("   • " + slbl + ": runs clean ✓ (no undefined outputs)", "ok");
+        else if (ev.passed === false) consoleLog("   • " + slbl + ": module produces X ✗" + (ev.reason ? " — " + ev.reason : ""), "error");
+        else consoleLog("   • " + slbl + ": inconclusive (couldn't parse/run)", "warn");
       }
-      // Generic synthesis (all modules)
-      if (ev.synthAvailable === false) {
-        consoleLog("   • synthesis: skipped (yosys not installed) — sim-only scan still ran", "warn");
-      } else if (ev.synthesizable === true) {
-        consoleLog("   • synthesis: synthesizable ✓", "ok");
-      } else if (ev.synthesizable === false) {
-        consoleLog("   • synthesis: NOT synthesizable ✗" + (ev.synthReason ? " — " + ev.synthReason : ""), "error");
-      }
+    } else if (ev.type === "floor") {
+      // Live checks (lint/synth/smoke) and the functional localization (drill) were
+      // already logged at event-time; the floor event carries only the final verdict.
       if (ev.tier === "smoke") {
-        // Smoke testbench (code-generated, no oracle)
-        if (ev.smokeSimPassed === true) {
-          consoleLog("   • smoke testbench: PASSED ✓ (no undefined outputs)", "ok");
-        } else if (ev.smokeSimPassed === false) {
-          consoleLog("   • smoke testbench: FAILED ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
-        } else {
-          consoleLog("   • smoke testbench: inconclusive (couldn't parse/run)", "warn");
-        }
         consoleLog("   → floor tier " + (ev.verification === "smoke" ? "PASSED ✓" : "FAILED ✗"),
           ev.verification === "smoke" ? "ok" : "error");
       } else {
-        // Smoke baseline (code-generated) runs on functional modules too — a
-        // reliable "does the module run clean?" signal, independent of the oracle.
-        if (ev.smokeSimPassed === true) {
-          consoleLog("   • smoke baseline: runs clean ✓ (no undefined outputs)", "ok");
-        } else if (ev.smokeSimPassed === false) {
-          consoleLog("   • smoke baseline: module produces X ✗" + (ev.smokeSimReason ? " — " + ev.smokeSimReason : ""), "error");
-        } else {
-          consoleLog("   • smoke baseline: inconclusive (testbench couldn't run)", "warn");
-        }
-        // Functional oracle testbench (LLM-written, checks against the spec)
-        if (ev.funcTbPassed === true) {
-          consoleLog("   • functional testbench (oracle): PASSED ✓", "ok");
-        } else if (ev.funcTbPassed === false) {
-          consoleLog("   • functional testbench (oracle): FAILED ✗" + (ev.funcTbReason ? " — " + ev.funcTbReason : ""), "error");
-        } else {
-          // Distinguish a broken oracle (smoke ran clean) from a genuinely unclear result.
-          var oracleMsg = ev.smokeSimPassed === true
-            ? "inconclusive — oracle testbench couldn't compile (module runs clean, so the TEST was broken)"
-            : "inconclusive (couldn't compile/run)";
-          consoleLog("   • functional testbench (oracle): " + oracleMsg, "warn");
-        }
+        if (ev.funcTbPassed === true) consoleLog("   • functional testbench (oracle): PASSED ✓", "ok");
+        else if (ev.funcTbPassed === false) consoleLog("   • functional testbench (oracle): FAILED ✗" + (ev.funcTbReason ? " — " + ev.funcTbReason : ""), "error");
+        else consoleLog("   • functional testbench (oracle): inconclusive" + (ev.smokeSimPassed === true ? " (module runs clean, so the TEST was broken)" : " (couldn't compile/run)"), "warn");
         consoleLog("   → functional tier " + (ev.verification === "functional" ? "VERIFIED ✓" : "not verified ✗"),
           ev.verification === "functional" ? "ok" : "warn");
       }
@@ -2117,8 +2095,9 @@
       }
     } else if (ev.type === "reviewing") {
       consoleLog("🔎 Verifier reviewing " + ev.count + " module summary/summaries against the spec…", "info");
-    } else if (ev.type === "built" && !ev.ok) {
-      consoleLog("✗ " + ev.module + " FAILED after " + ev.attempts + " attempts: " +
+    } else if (ev.type === "built") {
+      if (ev.ok) consoleLog("✓ " + ev.module + " built & verified", "ok");
+      else consoleLog("✗ " + ev.module + " FAILED after " + ev.attempts + " attempts: " +
         String(ev.error || "").slice(0, 200), "error");
     }
   }
