@@ -1109,6 +1109,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
 
       // Builder describes the module for the Verifier (summary, NOT the code).
       let summary = await summarizeModule(llm, mod, r.code);
+      if (onProgress) onProgress({ type: "summary", module: mod.name, summary: summary }); // logged the moment it happens
 
       // SPEC-CONFORMANCE CHECK + immediate correction. The Verifier checks this
       // module's summary against the spec (ports, behavior, and especially
@@ -1157,8 +1158,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         entry.tier = tier;
         entry.summary = summary; // used by the functional oracle + drill-down
       }
-      if (onProgress)
-        onProgress({ type: "summary", module: mod.name, summary, complexity: finalScore });
+      // (the "summary"/described event was already emitted right after the describe)
 
       // STRUCTURAL + VERIFICATION on every built module: lint + generic synthesis,
       // then a code-generated smoke baseline (runs clean?), then — for functional-
