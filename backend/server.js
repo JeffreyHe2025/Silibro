@@ -48,6 +48,16 @@ async function withBilling(req, provider, kind, fn) {
   return { result, balance: micros / 1e6 };
 }
 
+// Which commit is this server running? Compare to the latest on GitHub to know
+// if a git pull + pm2 restart is needed. Read once at startup.
+let RUNNING_COMMIT = "unknown";
+try {
+  RUNNING_COMMIT = require("child_process")
+    .execSync("git rev-parse --short HEAD", { cwd: __dirname, timeout: 3000 })
+    .toString().trim();
+} catch (e) { /* not a git checkout */ }
+app.get("/version", (_req, res) => res.json({ commit: RUNNING_COMMIT }));
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Compile-check arbitrary files (used by the frontend's loop / testbenches).
