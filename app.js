@@ -1732,6 +1732,26 @@
     }
 
     if (!isProject) {
+        // Hard scope guard for casual chat: redirect anything NOT about hardware,
+        // so off-topic requests are blocked here just like in the Verifier flow —
+        // regardless of how well the model obeys the system prompt. (Skipped when
+        // images are attached, since those may be schematics/diagrams.)
+        var onTopic = true;
+        if (!imgs.length) {
+            try {
+                var sysTopic = "Is the user's message about DIGITAL HARDWARE, Verilog/SystemVerilog, RTL, FPGAs, digital logic, or electronics design — including a question or explanation about it? Reply NO for greetings, small talk, or anything unrelated to hardware. Reply only YES or NO.";
+                var topicRes = await callLLM(provider, key, model, sysTopic, [{ role: "user", content: promptText }]);
+                if (/^\s*no\b/i.test(topicRes || "")) onTopic = false;
+            } catch (e) { /* on failure, don't block — default to answering */ }
+        }
+        if (!onTopic) {
+            bubble.textContent = "🛠 I only help with digital hardware design in Verilog/SystemVerilog. Please describe a hardware/Verilog design — a module, FSM, datapath, memory, interface, or testbench — and I'll help.";
+            chatHistory.push({ role: "assistant", content: bubble.textContent });
+            chatSend.disabled = false;
+            chatConversation.scrollTop = chatConversation.scrollHeight;
+            try { await saveConversation(); } catch (e) {}
+            return;
+        }
         // Fallback to normal chatbot behavior
         try {
             var sys = buildProjectContext();
