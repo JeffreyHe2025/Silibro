@@ -571,13 +571,15 @@ async function checkConformance(llm, spec, mod, summary) {
 // True if the code uses an ASYNCHRONOUS reset (a reset edge in the sensitivity list).
 function hasAsyncReset(code) {
   const c = String(code || "");
-  return /@\s*\(\s*(?:pos|neg)edge\s+\w+\s+or\s+(?:pos|neg)edge\s+\w*(?:rst|reset)\w*/i.test(c) ||
-         /@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s+or\s+(?:pos|neg)edge/i.test(c);
+  return /@\s*\(\s*(?:pos|neg)edge\s+\w+\s*(?:or|,)\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*/i.test(c) ||
+         /@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(?:or|,)\s*(?:pos|neg)edge/i.test(c);
 }
 function stripAsyncReset(code) {
   return String(code)
-    .replace(/(@\s*\(\s*(?:pos|neg)edge\s+\w+)\s+or\s+(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(\))/gi, "$1$2")
-    .replace(/@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s+or\s+((?:pos|neg)edge\s+\w+)\s*\)/gi, "@($1)");
+    // clock first:  @(posedge clk <or|,> negedge rst)  ->  @(posedge clk)
+    .replace(/(@\s*\(\s*(?:pos|neg)edge\s+\w+)\s*(?:or|,)\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(\))/gi, "$1$2")
+    // reset first:  @(negedge rst <or|,> posedge clk)  ->  @(posedge clk)
+    .replace(/@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(?:or|,)\s*((?:pos|neg)edge\s+\w+)\s*\)/gi, "@($1)");
 }
 
 async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
@@ -588,7 +590,7 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
   const sys =
     "You are a Verilog module writer. A module you wrote VIOLATES the design specification. " +
     "Rewrite ONLY the module '" + mod.name + "' to fix the violation(s), matching the spec's required " +
-    "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
+    "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench." + RESET_REF;
   let base =
     "Design spec:\n" + builderSpec(spec, mod.name) +
     "\n\nModule '" + mod.name + "' — " + (mod.purpose || "") +
