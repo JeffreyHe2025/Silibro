@@ -64,6 +64,9 @@ async function getGraph() {
     review: Annotation(),
     offTopic: Annotation(),
     redirect: Annotation(),
+    aborted: Annotation(),
+    abortReason: Annotation(),
+    abortModule: Annotation(),
   });
 
   // The Verifier writes (or rewrites) the spec.
@@ -157,6 +160,9 @@ async function getGraph() {
       summaries: out.summaries || [],
       manifest: out.manifest || [],
       dependencyGraph: out.dependencyGraph || "",
+      aborted: !!out.aborted,
+      abortReason: out.abortReason || "",
+      abortModule: out.abortModule || "",
     };
   }
 
@@ -239,6 +245,9 @@ function summarize(result) {
     manifest: (result && result.manifest) || [], // dev-only reference on the client
     dependencyGraph: (result && result.dependencyGraph) || "",
     review: (result && result.review) || "",
+    aborted: !!(result && result.aborted),
+    abortReason: (result && result.abortReason) || "",
+    abortModule: (result && result.abortModule) || "",
   };
 }
 

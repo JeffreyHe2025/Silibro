@@ -654,6 +654,15 @@ function chargeBudget(budget) {
   }
 }
 
+// Signal that aborts the whole build: a confirmed functional bug that couldn't be
+// fixed within the retry limit. buildDesign catches this and stops (boots out).
+function buildAbort(module, reason) {
+  const e = new Error(reason);
+  e.buildAbort = true;
+  e.module = module;
+  return e;
+}
+
 async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onProgress, budget, depth) {
   depth = depth || 0;
   const emit = (o) => { if (onProgress) onProgress(Object.assign({ type: "drill", depth: depth }, o)); };
@@ -696,11 +705,13 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
       emit({ module: entry.name, msg: "bug is in own logic — rebuilding" });
       const fixed = await fixModuleFunctional(llm, spec, entry, builtFiles);
       if (fixed) builtFiles[entry.name] = fixed;
-      else { emit({ module: entry.name, result: "unfixable" }); return false; }
+      else { emit({ module: entry.name, result: "unfixable" }); throw buildAbort(entry.name, "Couldn't produce a compiling fix for '" + entry.name + "'."); }
       // loop: re-test `entry` with the corrected code
     }
   }
-  return false;
+  // 3 rounds exhausted and the bug is still there — give up and stop the build.
+  emit({ module: entry.name, result: "unfixable" });
+  throw buildAbort(entry.name, "Couldn't fix the bug in '" + entry.name + "' after " + maxRounds + " attempts.");
 }
 
 // Full run. onProgress(ev) is called as modules start/finish (for streaming).
@@ -865,6 +876,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   let stopTests = false;   // "buildOnly": skip LLM verification (conformance + oracle)
   let raisedCutoff = false; // whether the user already chose "raiseCutoff"
   let cutoff = FLOOR_CUTOFF; // "raiseCutoff": bump so fewer modules hit the functional tier
+  let aborted = false, abortReason = "", abortModule = ""; // a bug unfixed after N tries stops the build
 
   const builtFiles = {};
   const results = [];
@@ -991,7 +1003,10 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
           if (structuralOk) {
             try {
               await localizeAndFix(llm, verifierLLM, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
-            } catch (e) { entry.funcTbOutput = String((e && e.message) || e); }
+            } catch (e) {
+              if (e && e.buildAbort) { aborted = true; abortReason = e.message; abortModule = e.module; }
+              else entry.funcTbOutput = String((e && e.message) || e);
+            }
             entry.verification = entry.verification === "functional" ? "functional" : "unverified";
           } else {
             entry.verification = "unverified"; // not synthesizable/lint-clean → can't be functional
@@ -1026,6 +1041,10 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
         error: r.error,
       });
     if (!r.ok) break; // stop the run if a module can't be made to compile
+    if (aborted) { // a functional bug couldn't be fixed in the retry limit — stop the build
+      if (onProgress) onProgress({ type: "aborted", module: abortModule, reason: abortReason });
+      break;
+    }
   }
 
   // Effective complexity: a module's own complexity PLUS the effective complexity
@@ -1055,7 +1074,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   // Final safety net: one holistic conformance review over all modules, looping
   // any flagged violation back to the Builder to fix (skipped if the user chose
   // "build only" at the budget prompt).
-  if (!stopTests) {
+  if (!stopTests && !aborted) {
     await finalConformanceSweep({ llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget });
   }
 
@@ -1066,6 +1085,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
     summaries,
     manifest,
     dependencyGraph: dependencyGraphMd(manifest),
+    aborted: aborted,
+    abortReason: abortReason,
+    abortModule: abortModule,
   };
 }
 

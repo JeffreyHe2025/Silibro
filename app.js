@@ -1912,6 +1912,9 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "aborted") {
+      consoleLog("⛔ build stopped — couldn't fix " + (ev.module || "a module") + " after 3 attempts" +
+        (ev.reason ? " (" + ev.reason + ")" : ""), "error");
     } else if (ev.type === "refixPlan") {
       if (ev.modules && ev.modules.length) consoleLog("🔧 re-fix plan: rewriting " + ev.modules.join(", "), "info");
       else consoleLog("🔧 re-fix: the Verifier found no mismatched modules", "ok");
@@ -2076,6 +2079,19 @@
   async function finishFlowBuild(data) {
     lastFlowData = data; // capture for the developer view
     updateDevButton();
+    // A bug that couldn't be fixed within the retry limit stops the build.
+    if (data.aborted) {
+      consoleLog("⛔ Build stopped: " + (data.abortReason || "a bug couldn't be fixed after 3 attempts."), "error");
+      var abMsg = "⛔ Build stopped — " + (data.abortReason || "couldn't fix a module after 3 attempts.") +
+        " Try a stronger model (e.g. Claude Sonnet) or simplify/clarify the spec, then send again.";
+      appendChatMsg("assistant", abMsg).classList.add("chat-error");
+      chatHistory.push({ role: "assistant", content: abMsg });
+      if (currentProjectId != null && lastFlowSpec) {
+        try { await applyFileEdits([{ name: "spec.md", content: lastFlowSpec }]); } catch (e) {}
+      }
+      try { await saveConversation(); } catch (e) {}
+      return;
+    }
     consoleLog("✅ Spec approved — Builder finished.", "ok");
     if (currentProjectId == null) { consoleLog("⚠ Open a project to save the built files.", "error"); return; }
     var filesObj = data.files || {};
