@@ -3106,6 +3106,7 @@
     // Bedrock has no key: "connecting" just means selecting it while signed in.
     if (provider === "bedrock") {
       if (!isSignedIn()) { alert("Sign in first — Bedrock uses your account's prepaid credits, not an API key."); return; }
+      setActiveConnectionId(null); // Bedrock uses no key — clear any active API key
       localStorage.setItem("llm_provider", "bedrock");
       setProviderModel("bedrock", getProviderModel("bedrock") || PROVIDER_INFO.bedrock.model);
       renderChatView();
@@ -3130,7 +3131,13 @@
         return m;
       }));
 
-      if (typed) addConnection(provider, typed); // create a new connection or set it active
+      // Make the connected key the ONE active connection (deactivating all others).
+      if (typed) {
+        addConnection(provider, typed); // new key -> created + set active
+      } else {
+        var existing = getConnections().filter(function (c) { return c.provider === provider; });
+        if (existing.length) setActiveConnectionId(existing[0].id); // existing key -> activate it
+      }
       localStorage.setItem("llm_provider", provider);
       setProviderModel(provider, successfulModel); // Set the default to the one that actually worked
       chatKeyInput.value = "";
