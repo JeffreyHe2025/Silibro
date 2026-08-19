@@ -108,11 +108,88 @@ function manifestReference(manifest) {
   );
 }
 
+// ---- Deterministic module header (option 1) --------------------------------
+// The Builder keeps hardcoding widths and dropping parameters, so we GENERATE the
+// header (module decl + parameters + port list) from the spec's interface and let
+// the model write only the body. The header can't be wrong because the model never
+// writes it. Ports use SystemVerilog 'logic' (safe under -g2012 / read_verilog -sv
+// for both combinational `assign` and sequential `always` outputs).
+
+// Ask the LLM for just this module's interface as JSON (a small, reliable task).
+async function genInterfaceContract(llm, spec, mod) {
+  const sys =
+    "Extract ONLY the interface of the Verilog module '" + mod.name + "' from the design spec. " +
+    "Return JSON ONLY (no prose, no code), exactly this shape:\n" +
+    '{"parameters":[{"name":"<PARAM>","default":"<value>"}],' +
+    '"ports":[{"name":"<port>","direction":"input|output|inout","width":"1 | [MSB:LSB] | PARAM"}]}\n' +
+    "Use EXACTLY the parameter names/defaults and port names, directions and widths the spec states for " +
+    "THIS module. If the spec lists no parameters, use []. width is \"1\" for a single bit, \"[7:0]\" for a " +
+    "bus, or a parameter name like \"DATA_WIDTH\".";
+  const user = "Design spec:\n" + spec + "\n\nModule: " + mod.name + (mod.purpose ? " \u2014 " + mod.purpose : "");
+  try {
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const t = reply.replace(/```json|```/g, "");
+    const obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
+    const ports = Array.isArray(obj.ports) ? obj.ports.filter((p) => p && p.name) : [];
+    const parameters = Array.isArray(obj.parameters) ? obj.parameters.filter((p) => p && p.name) : [];
+    return ports.length ? { parameters, ports } : null; // no ports -> nothing to scaffold
+  } catch (e) { return null; }
+}
+
+// Normalize a width spec into Verilog range syntax ("" for 1 bit).
+function normWidth(w) {
+  if (w == null) return "";
+  w = String(w).trim();
+  if (!w || w === "1") return "";
+  if (/^\[.*\]$/.test(w)) return w;                 // already [MSB:LSB]
+  if (/^\d+$/.test(w)) { const n = parseInt(w, 10); return n > 1 ? "[" + (n - 1) + ":0]" : ""; }
+  if (/^[A-Za-z_]\w*$/.test(w)) return "[" + w + "-1:0]"; // a parameter name
+  return "[" + w + "]";
+}
+
+// Build the exact module header from the contract (module + params + ports).
+function buildHeader(name, contract) {
+  if (!contract || !contract.ports || !contract.ports.length) return null;
+  let h = "module " + name;
+  const params = contract.parameters || [];
+  if (params.length) {
+    h += " #(\n" + params.map((p) => {
+      const d = (p.default != null && String(p.default).trim() !== "") ? p.default : "1";
+      return "  parameter " + p.name + " = " + d;
+    }).join(",\n") + "\n)";
+  }
+  h += " (\n" + contract.ports.map((p) => {
+    const dir = /out/i.test(p.direction) ? "output" : (/inout/i.test(p.direction) ? "inout" : "input");
+    const w = normWidth(p.width);
+    return "  " + dir + " logic " + (w ? w + " " : "") + p.name;
+  }).join(",\n") + "\n);";
+  return h;
+}
+
+// Split a generated module into its body (between the header ';' and 'endmodule'),
+// so we can force OUR header and keep only the model's body. Paren-depth aware, so
+// it handles a '#(...)' parameter list. Returns null if it can't be parsed safely.
+function splitHeaderBody(code) {
+  const start = code.search(/\bmodule\b/);
+  if (start < 0) return null;
+  let depth = 0, seenOpen = false, headerEnd = -1;
+  for (let i = start; i < code.length; i++) {
+    const c = code[i];
+    if (c === "(") { depth++; seenOpen = true; }
+    else if (c === ")") { depth--; }
+    else if (c === ";" && depth === 0 && seenOpen) { headerEnd = i; break; }
+  }
+  if (headerEnd < 0) return null;
+  const endIdx = code.lastIndexOf("endmodule");
+  if (endIdx < 0 || endIdx <= headerEnd) return null;
+  return { body: code.slice(headerEnd + 1, endIdx).trim() };
+}
+
 // Step 3: build one module, compile-checking it (with retries).
 // onAttempt(ev) (optional) is called after each compile so callers can stream
 // retries live: { type:'attempt', module, attempt, maxTries, ok, error }.
 // manifest (optional) is the whole-design status list, passed as LLM reference.
-async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, manifest) {
+async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, manifest, header) {
   maxTries = maxTries || 3;
   const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
   const depContext = depNames
@@ -122,8 +199,15 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
 
   let lastErr = "";
   for (let attempt = 1; attempt <= maxTries; attempt++) {
-    const sys =
-      "You are a Verilog module writer. Write exactly ONE synthesizable Verilog module named '" +
+    const sys = header ?
+      ("You are a Verilog module writer. You are given the EXACT module header (name, parameters, ports) — " +
+       "you MUST reproduce it VERBATIM and NOT change any parameter or port. Write ONLY the module BODY (the " +
+       "internal logic) between the header and 'endmodule'. Match the spec's behavior, clock edge, and reset " +
+       "style exactly. For a SYNCHRONOUS reset use 'always @(posedge clk)' with the reset checked INSIDE (do " +
+       "NOT put reset in the sensitivity list); for ASYNCHRONOUS include the reset edge. Ports are declared " +
+       "'logic'; drive sequential outputs in an always block and combinational outputs with assign. Output the " +
+       "COMPLETE module (header + body + endmodule) inside one ```verilog code block — no prose, no testbench.") :
+      ("You are a Verilog module writer. Write exactly ONE synthesizable Verilog module named '" +
       mod.name +
       "' that EXACTLY matches the design specification.\n" +
       "STRICT SPEC ADHERENCE — a mismatch with the spec is treated as an error and sent back to you, so get " +
@@ -135,7 +219,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "the sensitivity list (e.g. 'always @(posedge clk or negedge rst_n)'). Match active-high vs active-low.\n" +
       "- The behavior, parameters, and edge cases the spec describes for THIS module.\n" +
       "Re-read this module's section of the spec, then implement it precisely. Output ONLY the module inside a " +
-      "```verilog code block — no prose, no testbench.";
+      "```verilog code block — no prose, no testbench.");
     let user =
       "Design spec:\n" +
       spec +
@@ -144,6 +228,9 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "' — " +
       mod.purpose +
       ".";
+    if (header)
+      user += "\n\nUSE THIS EXACT MODULE HEADER (copy it verbatim; do NOT change any parameter or port):\n" +
+        "```verilog\n" + header + "\n  // write the module body here\nendmodule\n```";
     if (statusRef) user += statusRef;
     if (depContext)
       user +=
@@ -162,7 +249,12 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       system: sys,
       messages: [{ role: "user", content: user }],
     });
-    const code = extractVerilog(reply);
+    let code = extractVerilog(reply);
+    if (header) {
+      // Force OUR header (guaranteed-correct params/ports) and keep only the body.
+      const parts = splitHeaderBody(code);
+      if (parts) code = header + "\n" + parts.body + "\nendmodule";
+    }
 
     // Compile-check: this module + every module built so far (all its deps
     // are present); elaborate THIS module as the top.
@@ -265,6 +357,9 @@ function computeFeatures(code) {
 // numeric cutoff separates trivial select/wiring/register logic (smoke) from the
 // rest (functional). Cutoff is configurable via FLOOR_CUTOFF (default 22).
 const FLOOR_CUTOFF = parseInt(process.env.FLOOR_CUTOFF, 10) || 22;
+// Low temperature for the BUILDER LLM (any model) — steadier instruction-following.
+// The Verifier keeps its default temperature. Configurable via BUILDER_TEMPERATURE.
+const BUILDER_TEMP = process.env.BUILDER_TEMPERATURE != null ? parseFloat(process.env.BUILDER_TEMPERATURE) : 0.2;
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
@@ -777,6 +872,7 @@ async function finalConformanceSweep(ctx) {
 // files + manifest + a fresh review + overall pass/fail.
 async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgress) {
   verifierLLM = verifierLLM || llm;
+  llm = Object.assign({}, llm, { temperature: llm.temperature != null ? llm.temperature : BUILDER_TEMP });
   onProgress = onProgress || function () {};
   const list = (manifest || []).filter((m) => m && m.name && m.code);
   if (!list.length) return { files: {}, manifest: manifest || [], summaries: [], review: "", passed: null, fixed: [] };
@@ -847,6 +943,7 @@ async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgr
 // build just continues and warns.
 async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) {
   verifierLLM = verifierLLM || llm;
+  llm = Object.assign({}, llm, { temperature: llm.temperature != null ? llm.temperature : BUILDER_TEMP }); // steadier Builder
   control = control || {};
   const shouldStop = control.shouldStop || function () { return false; }; // cooperative cancel
   const seedFiles = control.seedFiles || null; // resume: modules already built (name.v -> code)
@@ -919,7 +1016,16 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       }
     }
     if (onProgress) onProgress({ type: "building", module: mod.name });
-    const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest);
+    // Option 1: generate this module's header (params + ports) from the spec so the
+    // Builder can't drop parameters or hardcode widths — it only writes the body.
+    // The Verifier LLM extracts the interface (it owns the spec); null -> the Builder
+    // writes the whole module as before (graceful fallback).
+    let header = null;
+    try {
+      const contract = await genInterfaceContract(verifierLLM, spec, mod);
+      header = contract ? buildHeader(mod.name, contract) : null;
+    } catch (e) { header = null; }
+    const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest, header);
     if (r.ok) {
       builtFiles[r.name] = r.code;
       const entry = manifestByName[mod.name];

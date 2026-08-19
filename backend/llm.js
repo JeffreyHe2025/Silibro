@@ -35,10 +35,10 @@ function parseDataUrl(url) {
   return { mediaType: m[1], data: m[2] };
 }
 
-async function callLLM({ provider, key, model, system, messages }) {
+async function callLLM({ provider, key, model, system, messages, temperature }) {
   // Bedrock: uses the server's AWS creds (no BYOK key) and meters token usage.
   if (provider === "bedrock") {
-    const { text, usage } = await callBedrock({ model, system, messages });
+    const { text, usage } = await callBedrock({ model, system, messages, temperature });
     recordUsage(model, usage);
     return text;
   }
@@ -63,6 +63,7 @@ async function callLLM({ provider, key, model, system, messages }) {
     });
     const body = { contents };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
+    if (temperature != null) body.generationConfig = { temperature };
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -95,6 +96,7 @@ async function callLLM({ provider, key, model, system, messages }) {
     });
     const body = { model, max_tokens: 8192, messages: msgs };
     if (system) body.system = system;
+    if (temperature != null) body.temperature = temperature;
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -127,7 +129,7 @@ async function callLLM({ provider, key, model, system, messages }) {
   const r = await fetch(endpoint, {
     method: "POST",
     headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages: msgs }),
+    body: JSON.stringify(temperature != null ? { model, messages: msgs, temperature } : { model, messages: msgs }),
   });
   if (!r.ok) throw new Error("LLM error " + r.status + ": " + (await r.text()));
   const d = await r.json();

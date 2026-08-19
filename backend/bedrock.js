@@ -66,7 +66,7 @@ function imageFormat(mediaType) {
 //   model: a Bedrock model id or inference-profile id/ARN
 //   system: optional system prompt string
 //   messages: [{ role:'user'|'assistant', content, images?:[dataUrl] }]
-async function callBedrock({ model, system, messages }) {
+async function callBedrock({ model, system, messages, temperature }) {
   const conv = (messages || []).map((m) => {
     const content = [];
     if (m.images && m.images.length) {
@@ -89,7 +89,7 @@ async function callBedrock({ model, system, messages }) {
   const input = {
     modelId: model,
     messages: conv,
-    inferenceConfig: { maxTokens: 8192 },
+    inferenceConfig: temperature != null ? { maxTokens: 8192, temperature } : { maxTokens: 8192 },
   };
   if (system) input.system = [{ text: system }];
 
