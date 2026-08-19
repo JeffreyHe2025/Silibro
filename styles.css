@@ -1440,3 +1440,8 @@ body.console-resizing, body.console-resizing * {
   background: #fff4e5; border: 1px solid #f6c177; border-radius: 6px;
   padding: 6px 8px; margin: 0 0 10px;
 }
+
+/* Stop / Continue build controls in the chat */
+.build-controls { background: #f1f5f9; border: 1px solid #cbd5e1; }
+.build-controls .btn { background: #334155; color: #fff; }
+.build-controls .btn:disabled { opacity: .6; }

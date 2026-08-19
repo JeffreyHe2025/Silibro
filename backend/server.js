@@ -15,7 +15,7 @@ const express = require("express");
 const cors = require("cors");
 const { buildDesign, refixFromReview, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
-const { startFlow, resumeFlow, resolveDecision } = require("./flow");
+const { startFlow, resumeFlow, resolveDecision, requestStop, isStopped } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
 const {
   billingReady, authUser, assertCredits, chargeUsage,
@@ -290,6 +290,47 @@ app.post("/flow/decision", (req, res) => {
   res.json({ ok });
 });
 
+// Stop an in-progress build. The build checks this between modules and returns
+// its partial result. (The client hitting Stop / disconnecting also triggers it.)
+app.post("/flow/stop", (req, res) => {
+  const { threadId } = req.body || {};
+  if (!threadId) return res.status(400).json({ error: "threadId required" });
+  requestStop(threadId);
+  res.json({ ok: true });
+});
+
+// Resume/continue a build from the current project files (no spec re-approval).
+// Runs the build seeded with the files already built, skipping done modules and
+// building the rest. Streams NDJSON like /flow/approve.
+//   body: { spec, files:[{name,code}], provider, key?, verifierModel?, builderModel?, model?, threadId? }
+app.post("/flow/continue", async (req, res) => {
+  const { spec, files, provider, key, verifierModel, builderModel, model, threadId } = req.body || {};
+  if (!spec || !provider || (provider !== "bedrock" && !key)) {
+    return res.status(400).json({ error: "spec, provider (and key for BYOK) are required" });
+  }
+  const tid = threadId || crypto.randomUUID();
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  res.on("close", () => requestStop(tid));
+  send({ threadId: tid }); // let the client target this build with /flow/stop
+  try {
+    const builder = { provider, key, model: builderModel || model };
+    const verifier = { provider, key, model: verifierModel || builderModel || model };
+    const seedFiles = (files || []).filter((f) => f && /\.s?v$/i.test(f.name));
+    const control = { seedFiles, shouldStop: () => isStopped(tid) };
+    const { result: out, balance } = await withBilling(req, provider, "flow", () =>
+      buildDesign(builder, spec, (ev) => send({ type: "progress", event: ev }), verifier, null, control)
+    );
+    send({ threadId: tid, done: true, ...out, balance });
+  } catch (e) {
+    send({ error: String((e && e.message) || e) });
+  }
+  res.end();
+});
+
 app.post("/flow/approve", async (req, res) => {
   const { threadId, approved, changes, provider } = req.body || {};
   if (!threadId) return res.status(400).json({ error: "threadId required" });
@@ -299,6 +340,7 @@ app.post("/flow/approve", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering if present
   res.flushHeaders();
   const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  res.on("close", () => requestStop(threadId)); // client hit Stop / navigated away
 
   try {
     // The Builder (the token-heavy phase) runs here, so meter/charge here too.

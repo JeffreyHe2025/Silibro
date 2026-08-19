@@ -1840,7 +1840,106 @@
     }
   }
 
+  var activeBuildThreadId = null; // the build currently running (for Stop)
+  function genUUID() {
+    try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+    return "b-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
+  }
+  // Save a module's code to the project as it's built, so a Stop preserves progress.
+  async function saveBuiltFile(name, code) {
+    if (currentProjectId == null || !name) return;
+    var existing = files.find(function (f) { return f.name === name; });
+    if (existing) {
+      existing.code = code;
+      try { await dbUpdateFile(existing.id, { name: name, code: code }); } catch (e) {}
+    } else {
+      try {
+        var r = await dbCreateFile(currentProjectId, name, code);
+        if (!r.error) { files.push(r.data); renderFileList(); }
+      } catch (e) {}
+    }
+  }
+  // ---- Stop / Continue controls ----
+  function removeBuildControls() {
+    var el = $("build-controls"); if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+  function showStopButton() {
+    removeBuildControls();
+    var wrap = document.createElement("div");
+    wrap.id = "build-controls"; wrap.className = "chat-msg assistant build-controls";
+    var btn = document.createElement("button");
+    btn.className = "btn"; btn.textContent = "⏹ Stop build";
+    btn.addEventListener("click", function () {
+      btn.disabled = true; btn.textContent = "stopping…";
+      stopActiveBuild();
+    });
+    wrap.appendChild(btn);
+    chatConversation.appendChild(wrap);
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+  }
+  function showContinueButton() {
+    removeBuildControls();
+    var wrap = document.createElement("div");
+    wrap.id = "build-controls"; wrap.className = "chat-msg assistant build-controls";
+    var p = document.createElement("div");
+    p.textContent = "⏸ Build stopped. Resume from where it left off:";
+    var btn = document.createElement("button");
+    btn.className = "btn"; btn.style.marginTop = "6px"; btn.textContent = "▶ Continue build";
+    btn.addEventListener("click", function () { btn.disabled = true; removeBuildControls(); resumeBuild(); });
+    wrap.appendChild(p); wrap.appendChild(btn);
+    chatConversation.appendChild(wrap);
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+  }
+  function stopActiveBuild() {
+    if (!activeBuildThreadId) return;
+    var base = getBackendUrl();
+    fetch(base + "/flow/stop", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: activeBuildThreadId }),
+    }).catch(function () {}); // the build stops between modules and returns its partial result
+  }
+  // Resume a stopped build: rebuild from the current project files (skip done modules).
+  async function resumeBuild() {
+    var base = getBackendUrl();
+    if (!base) { consoleLog("⚠ Set a backend first.", "error"); return; }
+    var provider = currentProvider();
+    var key = getProviderKey(provider);
+    if (!key) { renderChatView(); return; }
+    var spec = lastFlowSpec || "";
+    if (!spec) { var sf = files.find(function (f) { return /^spec\.md$/i.test(f.name); }); spec = (sf && sf.code) || ""; }
+    if (!spec) { consoleLog("⚠ No spec to resume from — start a new build.", "error"); return; }
+    var vfiles = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })
+      .map(function (f) { return { name: f.name, code: f.code || "" }; });
+    var model = getProviderModel(provider);
+    var tid = genUUID(); activeBuildThreadId = tid;
+    var bubble = appendChatMsg("assistant", "▶ Resuming build…");
+    showStopButton();
+    try {
+      var resp = await fetch(base + "/flow/continue", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+        body: JSON.stringify({ threadId: tid, spec: spec, files: vfiles, provider: provider, key: key, builderModel: model, verifierModel: model }),
+      });
+      var data = await readFlowStream(resp);
+      if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
+      if (!data || data.error) {
+        bubble.textContent = "⚠ " + ((data && data.error) || "resume failed");
+        bubble.classList.add("chat-error");
+        if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
+        return;
+      }
+      await finishFlowBuild(data);
+    } catch (e) {
+      bubble.textContent = "⚠ resume error: " + ((e && e.message) || e);
+      bubble.classList.add("chat-error");
+    } finally {
+      activeBuildThreadId = null; removeBuildControls();
+      refreshCredits();
+    }
+  }
+
   async function flowDecision(approved, changes) {
+
     var base = getBackendUrl();
     if (!base || !flowThreadId) return;
     setSpecBusy(true);
@@ -1849,6 +1948,8 @@
     if (approved) {
       hideSpecModal();
       bubble = appendChatMsg("assistant", "🔨 Building… compiling each module with iverilog. This can take a moment.");
+      activeBuildThreadId = flowThreadId;
+      showStopButton();
     } else {
       specModalText.textContent = "Verifier is revising the spec based on your changes…";
     }
@@ -1874,6 +1975,7 @@
       // The response is newline-delimited JSON: build events stream in live,
       // then a final line carries the result. (Rejections send only that line.)
       var data = await readFlowStream(resp);
+      activeBuildThreadId = null; removeBuildControls();
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance); // Bedrock spend
       if (!data || data.error) {
         var errText = "⚠ " + ((data && data.error) || "no response from backend");
@@ -1889,6 +1991,7 @@
       await finishFlowBuild(data);
       refreshCredits();
     } catch (e) {
+      activeBuildThreadId = null; removeBuildControls();
       var errText = "⚠ " + ((e && e.message) || e);
       if (bubble) { bubble.textContent = errText; bubble.classList.add("chat-error"); }
       else specModalText.textContent = errText;
@@ -1912,6 +2015,12 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "file") {
+      saveBuiltFile(ev.name, ev.code); // persist each module as it's built (survives Stop)
+    } else if (ev.type === "skipped") {
+      consoleLog("⏭ " + ev.module + " — already built, skipping (resume)", "info");
+    } else if (ev.type === "stopped") {
+      consoleLog("⏹ build stopped by user" + (ev.module ? " (before " + ev.module + ")" : ""), "warn");
     } else if (ev.type === "refixPlan") {
       if (ev.modules && ev.modules.length) consoleLog("🔧 re-fix plan: rewriting " + ev.modules.join(", "), "info");
       else consoleLog("🔧 re-fix: the Verifier found no mismatched modules", "ok");
@@ -2076,7 +2185,8 @@
   async function finishFlowBuild(data) {
     lastFlowData = data; // capture for the developer view
     updateDevButton();
-    consoleLog("✅ Spec approved — Builder finished.", "ok");
+    if (data.stopped) consoleLog("⏹ Build stopped — partial progress saved.", "warn");
+    else consoleLog("✅ Spec approved — Builder finished.", "ok");
     if (currentProjectId == null) { consoleLog("⚠ Open a project to save the built files.", "error"); return; }
     var filesObj = data.files || {};
     var edits = [];
@@ -2108,7 +2218,9 @@
     });
     if (Object.keys(filesObj).length) {
       var applied = await applyFileEdits(edits);
-      var msg1 = "🏗 Built " + Object.keys(filesObj).length + " module(s) and saved the spec. Files: " + applied.join(", ");
+      var msg1 = data.stopped
+        ? "⏸ Build stopped — saved " + Object.keys(filesObj).length + " module(s) so far: " + applied.join(", ") + ". Click Continue to finish."
+        : "🏗 Built " + Object.keys(filesObj).length + " module(s) and saved the spec. Files: " + applied.join(", ");
       appendChatMsg("assistant", msg1);
       chatHistory.push({ role: "assistant", content: msg1 });
 
@@ -2134,6 +2246,7 @@
       appendChatMsg("assistant", msg4);
       chatHistory.push({ role: "assistant", content: msg4 });
     }
+    if (data.stopped) showContinueButton(); // let the user resume where it left off
     try { await saveConversation(); } catch (e) {}
   }
 

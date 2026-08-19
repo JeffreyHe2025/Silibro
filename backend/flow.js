@@ -34,6 +34,13 @@ const progressListeners = new Map();
 // choice; POST /flow/decision resolves the pending promise here so the build (which
 // is still running inside the open stream) can continue.
 const pendingDecisions = new Map(); // threadId -> resolve(choice)
+
+// Cooperative build cancellation, keyed by threadId. Set by POST /flow/stop (or
+// the client disconnecting); buildDesign checks it between modules and stops.
+const stopFlags = new Map(); // threadId -> true
+function requestStop(threadId) { if (threadId) stopFlags.set(threadId, true); }
+function isStopped(threadId) { return stopFlags.get(threadId) === true; }
+
 function resolveDecision(threadId, choice) {
   const r = pendingDecisions.get(threadId);
   if (r) { pendingDecisions.delete(threadId); r(choice); return true; }
@@ -149,7 +156,8 @@ async function getGraph() {
       // The VERIFIER model writes the functional oracle testbench + conformance
       // review — independent of the Builder that wrote the code.
       { provider: state.provider, key: state.key, model: state.verifierModel },
-      decide
+      decide,
+      { shouldStop: function () { return isStopped(state.threadId); } }
     );
     return {
       files: out.files || {},
@@ -276,7 +284,8 @@ async function resumeFlow(threadId, decision, onProgress) {
   } finally {
     progressListeners.delete(threadId);
     pendingDecisions.delete(threadId); // in case the build ended while awaiting a decision
+    stopFlags.delete(threadId);
   }
 }
 
-module.exports = { startFlow, resumeFlow, resolveDecision };
+module.exports = { startFlow, resumeFlow, resolveDecision, requestStop, isStopped };

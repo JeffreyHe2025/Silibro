@@ -845,8 +845,12 @@ async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgr
 // "raiseCutoff", called ONCE when verification passes the soft threshold, so the
 // interactive flow can ask the user how to proceed. Without it (e.g. /build), the
 // build just continues and warns.
-async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
+async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) {
   verifierLLM = verifierLLM || llm;
+  control = control || {};
+  const shouldStop = control.shouldStop || function () { return false; }; // cooperative cancel
+  const seedFiles = control.seedFiles || null; // resume: modules already built (name.v -> code)
+  let stopped = false;
   const modules = await planGraph(llm, spec);
   const { order, cycle } = topoSort(modules);
   if (onProgress)
@@ -877,9 +881,28 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   let cutoff = FLOOR_CUTOFF; // "raiseCutoff": bump so fewer modules hit the functional tier
 
   const builtFiles = {};
+  // Resume: seed already-built modules so we skip them and only build the rest.
+  if (seedFiles && seedFiles.length) {
+    order.forEach((m) => {
+      const sf = seedFiles.find((f) => f && new RegExp("\\bmodule\\s+" + m.name + "\\b").test(f.code || ""));
+      if (sf) builtFiles[m.name] = sf.code;
+    });
+  }
   const results = [];
   const summaries = [];
   for (const mod of order) {
+    // Cooperative stop: bail cleanly between modules if the client cancelled.
+    if (shouldStop()) { stopped = true; if (onProgress) onProgress({ type: "stopped", module: mod.name }); break; }
+    // Resume: if this module is already built (from seedFiles) and still compiles,
+    // keep it and skip the rebuild + verification entirely.
+    if (seedFiles && builtFiles[mod.name]) {
+      const chk = await compileVerilog(Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] })), mod.name);
+      if (chk.ok) {
+        const e0 = manifestByName[mod.name]; if (e0) e0.built = true;
+        if (onProgress) onProgress({ type: "skipped", module: mod.name, reason: "already built" });
+        continue;
+      }
+    }
     // Verification passed the soft threshold last iteration → resolve the policy
     // before doing any more verification. Interactive flow asks; else just warn.
     // Re-ask only offers the reduce-LLM-call options not already taken.
@@ -1027,7 +1050,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
       }
     }
     results.push(r);
-    if (onProgress)
+    if (onProgress) {
+      if (r.ok && builtFiles[mod.name]) // stream the final code so a stop preserves progress
+        onProgress({ type: "file", name: mod.name + ".v", code: builtFiles[mod.name] });
       onProgress({
         type: "built",
         module: mod.name,
@@ -1035,6 +1060,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
         attempts: r.attempts,
         error: r.error,
       });
+    }
     if (!r.ok) break; // stop the run if a module can't be made to compile
   }
 
@@ -1065,7 +1091,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
   // Final safety net: one holistic conformance review over all modules, looping
   // any flagged violation back to the Builder to fix (skipped if the user chose
   // "build only" at the budget prompt).
-  if (!stopTests) {
+  if (!stopTests && !stopped) {
     await finalConformanceSweep({ llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget });
   }
 
@@ -1076,6 +1102,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide) {
     summaries,
     manifest,
     dependencyGraph: dependencyGraphMd(manifest),
+    stopped: stopped,
   };
 }
 
