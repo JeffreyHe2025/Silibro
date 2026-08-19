@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Verilog Coder</title>
-  <link rel="stylesheet" href="styles.css?v=49" />
+  <link rel="stylesheet" href="styles.css?v=50" />
 </head>
 <body>
   <header class="topbar">
@@ -160,6 +160,7 @@
         Connect an LLM to start chatting. Pick a provider and paste your API key —
         it's stored only in your browser, and usage is billed to your own account.
       </p>
+      <p class="chat-key-warning">🔒 For your security, saved API keys are cleared when you close this site (they survive a page reload). You'll re-enter your key next visit.</p>
       <label class="chat-setup-label">Provider</label>
       <select id="chat-provider" class="chat-field">
         <option value="bedrock">Amazon Bedrock — prepaid credits, no key</option>
@@ -337,7 +338,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="config.js?v=49"></script>
-  <script src="app.js?v=49"></script>
+  <script src="config.js?v=50"></script>
+  <script src="app.js?v=50"></script>
 </body>
 </html>

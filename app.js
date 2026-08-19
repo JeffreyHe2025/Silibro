@@ -2619,15 +2619,28 @@
   };
 
   // --- Per-provider key/model storage (each LLM remembers its own key) ---
+  // API keys live in sessionStorage, so they're cleared when the browser/tab is
+  // CLOSED (but survive a reload). One-time migration moves any old localStorage
+  // copy over, then deletes it so keys never persist across sessions again.
+  (function migrateKeysToSession() {
+    try {
+      var old = localStorage.getItem("llm_connections");
+      if (old && !sessionStorage.getItem("llm_connections")) sessionStorage.setItem("llm_connections", old);
+      var oldActive = localStorage.getItem("llm_active_connection_id");
+      if (oldActive && !sessionStorage.getItem("llm_active_connection_id")) sessionStorage.setItem("llm_active_connection_id", oldActive);
+      localStorage.removeItem("llm_connections");
+      localStorage.removeItem("llm_active_connection_id");
+    } catch (e) {}
+  })();
   function getConnections() {
-    try { return JSON.parse(localStorage.getItem("llm_connections")) || []; }
+    try { return JSON.parse(sessionStorage.getItem("llm_connections")) || []; }
     catch(e) { return []; }
   }
-  function saveConnections(conns) { localStorage.setItem("llm_connections", JSON.stringify(conns)); }
-  function getActiveConnectionId() { return localStorage.getItem("llm_active_connection_id"); }
+  function saveConnections(conns) { sessionStorage.setItem("llm_connections", JSON.stringify(conns)); }
+  function getActiveConnectionId() { return sessionStorage.getItem("llm_active_connection_id"); }
   function setActiveConnectionId(id) { 
-    if (id) localStorage.setItem("llm_active_connection_id", id);
-    else localStorage.removeItem("llm_active_connection_id");
+    if (id) sessionStorage.setItem("llm_active_connection_id", id);
+    else sessionStorage.removeItem("llm_active_connection_id");
   }
 
   function currentProvider() { return localStorage.getItem("llm_provider") || "openrouter"; }
@@ -2665,7 +2678,7 @@
   }
   function setProviderModel(p, m) { localStorage.setItem("llm_model_" + p, m); }
   function clearAllProviderKeys() {
-    localStorage.removeItem("llm_connections");
+    sessionStorage.removeItem("llm_connections");
     setActiveConnectionId(null);
   }
 

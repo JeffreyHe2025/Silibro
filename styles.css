@@ -1433,3 +1433,10 @@ body.console-resizing, body.console-resizing * {
 .refix-offer { border: 1px solid #f6c177; background: #fff8ec; }
 .refix-offer .btn { background: #b45309; color: #fff; }
 .refix-offer .btn:disabled { opacity: .6; }
+
+/* Key-setup security warning: session-only API keys */
+.chat-key-warning {
+  font-size: 12px; line-height: 1.4; color: #92400e;
+  background: #fff4e5; border: 1px solid #f6c177; border-radius: 6px;
+  padding: 6px 8px; margin: 0 0 10px;
+}
