@@ -108,6 +108,39 @@ function manifestReference(manifest) {
   );
 }
 
+// ---- Per-module spec slice -------------------------------------------------
+// Specs are organized by module ('## <module_name>' sections), so the Builder only
+// needs its own module's section (plus the title + Overview for minimal context)
+// instead of the whole spec every time. Falls back to the full spec if the
+// module's section can't be isolated.
+function specSection(spec, matches) {
+  const lines = String(spec || "").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const hm = /^(#{1,6})\s+(.*)$/.exec(lines[i]);
+    if (hm && matches(hm[2])) {
+      const level = hm[1].length;
+      const out = [lines[i]];
+      for (let j = i + 1; j < lines.length; j++) {
+        const nh = /^(#{1,6})\s+/.exec(lines[j]);
+        if (nh && nh[1].length <= level) break;
+        out.push(lines[j]);
+      }
+      return out.join("\n").trim();
+    }
+  }
+  return "";
+}
+function builderSpec(spec, name) {
+  if (!spec || !name) return spec;
+  const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const nameRe = new RegExp("\\b" + esc + "\\b");
+  const modSec = specSection(spec, (t) => nameRe.test(t));
+  if (!modSec) return spec; // couldn't isolate this module -> send the whole spec
+  const title = (String(spec).match(/^#\s+.*$/m) || [""])[0];
+  const overview = specSection(spec, (t) => /^overview$/i.test(t.trim()));
+  return [title, overview, modSec].filter(Boolean).join("\n\n");
+}
+
 // ---- Deterministic module header (option 1) --------------------------------
 // The Builder keeps hardcoding widths and dropping parameters, so we GENERATE the
 // header (module decl + parameters + port list) from the spec's interface and let
@@ -125,7 +158,7 @@ async function genInterfaceContract(llm, spec, mod) {
     "Use EXACTLY the parameter names/defaults and port names, directions and widths the spec states for " +
     "THIS module. If the spec lists no parameters, use []. width is \"1\" for a single bit, \"[7:0]\" for a " +
     "bus, or a parameter name like \"DATA_WIDTH\".";
-  const user = "Design spec:\n" + spec + "\n\nModule: " + mod.name + (mod.purpose ? " \u2014 " + mod.purpose : "");
+  const user = "Design spec:\n" + builderSpec(spec, mod.name) + "\n\nModule: " + mod.name + (mod.purpose ? " \u2014 " + mod.purpose : "");
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
     const t = reply.replace(/```json|```/g, "");
@@ -222,7 +255,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "```verilog code block — no prose, no testbench.");
     let user =
       "Design spec:\n" +
-      spec +
+      builderSpec(spec, mod.name) +
       "\n\nWrite the module '" +
       mod.name +
       "' — " +
@@ -527,7 +560,7 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
     "Rewrite ONLY the module '" + mod.name + "' to fix the violation(s), matching the spec's required " +
     "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
   let base =
-    "Design spec:\n" + spec +
+    "Design spec:\n" + builderSpec(spec, mod.name) +
     "\n\nModule '" + mod.name + "' — " + (mod.purpose || "") +
     " — has these SPEC VIOLATIONS to fix:\n" + issues +
     "\n\nReturn a corrected version of '" + mod.name + "' that conforms to the spec.";
@@ -699,7 +732,7 @@ async function fixModuleFunctional(llm, spec, entry, builtFiles) {
     "Rewrite ONLY the module '" + entry.name + "' to fix the bug, keeping the SAME interface (ports/params). " +
     "Output ONLY that module inside a ```verilog code block — no prose, no testbench.";
   let base =
-    "Design spec:\n" + spec +
+    "Design spec:\n" + builderSpec(spec, entry.name) +
     "\n\nModule '" + entry.name + "' — " + (entry.purpose || "") +
     " — FAILED this functional test (expected vs actual):\n" + (entry.funcTbOutput || "") +
     "\n\nReturn a corrected version of '" + entry.name + "'.";
