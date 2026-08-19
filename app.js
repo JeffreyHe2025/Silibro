@@ -2431,22 +2431,19 @@
     var badge = $("credits-badge");
     if (!badge) return;
     if (!st || !isSignedIn()) { badge.classList.add("hidden"); return; }
-    var free = Number(st.free_remaining || 0), credits = Number(st.credits || 0);
-    var remaining = Number(st.remaining != null ? st.remaining : free + credits);
-    var text;
-    if (remaining <= 0) text = "Free limit reached";
-    else if (credits > 0) text = "Free $" + free.toFixed(2) + " + $" + credits.toFixed(2) + " credit";
-    else text = "Free: $" + free.toFixed(2) + " left this month";
-    badge.textContent = text;
-    badge.title = "Monthly free allowance: $" + free.toFixed(2) + " of $" + Number(st.monthly_cap || 0).toFixed(2) +
-      " left" + (credits > 0 ? "; prepaid credits: $" + credits.toFixed(2) : "");
+    var remaining = Number(st.tokens_remaining || 0);
+    var cap = Number(st.monthly_token_cap || 0);
+    function fmt(n) { return n >= 1000 ? Math.round(n / 1000) + "k" : String(n); }
+    badge.textContent = remaining <= 0 ? "Free tokens used up" : "Free: " + fmt(remaining) + " tokens left";
+    badge.title = "Monthly free allowance: " + remaining.toLocaleString() + " of " + cap.toLocaleString() +
+      " tokens left this month (resets on the 1st)";
     badge.classList.remove("hidden");
     badge.classList.toggle("credits-low", remaining <= 0);
   }
-  // Back-compat shim: a bare dollar number (inline updates) or null (hide).
-  function updateCreditsBadge(dollars) {
-    if (dollars == null) { renderCreditsBadge(null); return; }
-    refreshCredits(); // fetch the full free/credits breakdown for an accurate badge
+  // Back-compat shim: any inline call just refreshes the full token status.
+  function updateCreditsBadge(v) {
+    if (v == null) { renderCreditsBadge(null); return; }
+    refreshCredits();
   }
   async function refreshCredits() {
     if (!isSignedIn()) { renderCreditsBadge(null); return; }
@@ -2471,7 +2468,7 @@
   // Called when a Bedrock call returns 402. Nudge the user to top up.
   function onOutOfCredits() {
     refreshCredits();
-    if (confirm("You've used your free monthly Bedrock allowance. Add prepaid credits to keep going now (resets on the 1st)?")) startTopup();
+    alert("You've used your free monthly token allowance. It resets on the 1st \u2014 or connect your own API key (\ud83d\udd11) to keep going now.");
   }
   // After returning from Stripe Checkout (?topup=success), refresh the balance.
   function handleTopupReturn() {

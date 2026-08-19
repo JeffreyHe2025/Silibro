@@ -56,13 +56,13 @@ async function authUser(req) {
 // period server-side so a new month frees the user up automatically.
 async function getStatus(userId) {
   const { data, error } = await admin.rpc("usage_status", { p_user: userId });
-  if (error || !data) return { free_remaining_micros: 0, monthly_cap_micros: 0, period_used_micros: 0, credit_micros: 0, remaining_micros: 0 };
+  if (error || !data) return { tokens_remaining: 0, monthly_token_cap: 0, tokens_used: 0 };
   return data;
 }
-// Total spendable right now (free allowance left + prepaid credits), in micros.
+// Free tokens remaining this month.
 async function getBalance(userId) {
   const st = await getStatus(userId);
-  return Number(st.remaining_micros || 0);
+  return Number(st.tokens_remaining || 0);
 }
 
 // Gate a call BEFORE running it: allowed if free allowance remains OR the user
@@ -70,7 +70,7 @@ async function getBalance(userId) {
 async function assertCredits(userId) {
   const { data, error } = await admin.rpc("can_spend", { p_user: userId });
   if (error) throw new Error("quota check failed: " + error.message);
-  if (data !== true) { const e = new Error("monthly free limit reached"); e.status = 402; throw e; }
+  if (data !== true) { const e = new Error("monthly free token limit reached"); e.status = 402; throw e; }
   return true;
 }
 
@@ -88,7 +88,7 @@ async function chargeUsage(userId, kind, usage) {
     p_user: userId, p_cost: cost, p_kind: kind, p_model: model, p_in: inTok, p_out: outTok,
   });
   if (error) throw new Error("charge failed: " + error.message);
-  return Number((data && data.remaining_micros) || 0);
+  return Number((data && data.tokens_remaining) || 0);
 }
 
 // Find or create the user's Stripe customer, remembering it on the account row.
@@ -112,11 +112,9 @@ billingRouter.get("/account", async (req, res) => {
     const userId = await authUser(req);
     const st = await getStatus(userId);
     res.json({
-      free_remaining: (st.free_remaining_micros || 0) / 1e6,
-      monthly_cap: (st.monthly_cap_micros || 0) / 1e6,
-      period_used: (st.period_used_micros || 0) / 1e6,
-      credits: (st.credit_micros || 0) / 1e6,
-      remaining: (st.remaining_micros || 0) / 1e6,
+      tokens_remaining: Number(st.tokens_remaining || 0),
+      monthly_token_cap: Number(st.monthly_token_cap || 0),
+      tokens_used: Number(st.tokens_used || 0),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
