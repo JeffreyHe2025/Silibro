@@ -1689,6 +1689,7 @@
     var promptText = chatInput.value.trim();
     var imgs = pendingImages.slice();
     if (!promptText && !imgs.length) { chatInput.focus(); return; }
+    removeBuildControls(); // a new prompt supersedes any stopped-build "Continue"
 
     var model = getProviderModel(provider);
 
