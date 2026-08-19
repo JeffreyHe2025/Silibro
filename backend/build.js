@@ -584,6 +584,17 @@ function hasAsyncReset(code) {
   return /@\s*\(\s*(?:pos|neg)edge\s+\w+\s*(?:or|,)\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*/i.test(c) ||
          /@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(?:or|,)\s*(?:pos|neg)edge/i.test(c);
 }
+// Deterministically classify a module's reset from its CODE (not the LLM summary):
+// asynchronous = a reset edge in the sensitivity list; synchronous = a reset checked
+// inside a clocked block; null = none/unclear (then keep the summary's value).
+function detectResetType(code) {
+  const c = String(code || "");
+  if (hasAsyncReset(c)) return "asynchronous";
+  const clocked = /@\s*\(\s*(?:pos|neg)edge\b/.test(c);
+  const syncResetCheck = /\bif\s*\(\s*[!~]?\s*\w*(?:rst|reset)\w*\b/i.test(c);
+  if (clocked && syncResetCheck) return "synchronous";
+  return null;
+}
 function stripAsyncReset(code) {
   return String(code)
     // clock first:  @(posedge clk <or|,> negedge rst)  ->  @(posedge clk)
@@ -1136,6 +1147,11 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
 
       // Builder describes the module for the Verifier (summary, NOT the code).
       let summary = await summarizeModule(llm, mod, r.code);
+      // Trust the CODE over the LLM's self-description for reset type: a wrong
+      // summary ("asynchronous" on synchronous code) causes phantom conformance
+      // violations the strip can't fix (nothing is wrong in the code).
+      { const rt = detectResetType(r.code);
+        if (rt && summary && summary.clockReset && typeof summary.clockReset === "object") summary.clockReset.resetType = rt; }
       if (onProgress) onProgress({ type: "summary", module: mod.name, summary: summary }); // logged the moment it happens
 
       // SPEC-CONFORMANCE CHECK + immediate correction. The Verifier checks this
