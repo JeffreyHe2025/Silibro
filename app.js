@@ -2016,6 +2016,8 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "resetFix") {
+      consoleLog("🔧 " + ev.module + ": reset auto-corrected in code (async → synchronous, no LLM call)", "ok");
     } else if (ev.type === "file") {
       saveBuiltFile(ev.name, ev.code); // persist each module as it's built (survives Stop)
     } else if (ev.type === "skipped") {

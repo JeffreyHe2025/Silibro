@@ -154,10 +154,12 @@ async function genInterfaceContract(llm, spec, mod) {
     "Extract ONLY the interface of the Verilog module '" + mod.name + "' from the design spec. " +
     "Return JSON ONLY (no prose, no code), exactly this shape:\n" +
     '{"parameters":[{"name":"<PARAM>","default":"<value>"}],' +
-    '"ports":[{"name":"<port>","direction":"input|output|inout","width":"1 | [MSB:LSB] | PARAM"}]}\n' +
+    '"ports":[{"name":"<port>","direction":"input|output|inout","width":"1 | [MSB:LSB] | PARAM"}],' +
+    '"reset":{"type":"synchronous|asynchronous|none","polarity":"active-low|active-high|none"}}\n' +
     "Use EXACTLY the parameter names/defaults and port names, directions and widths the spec states for " +
     "THIS module. If the spec lists no parameters, use []. width is \"1\" for a single bit, \"[7:0]\" for a " +
-    "bus, or a parameter name like \"DATA_WIDTH\".";
+    "bus, or a parameter name like \"DATA_WIDTH\". For reset, report the EXACT type and polarity the spec " +
+    "states (or none if the module has no reset).";
   const user = "Design spec:\n" + builderSpec(spec, mod.name) + "\n\nModule: " + mod.name + (mod.purpose ? " \u2014 " + mod.purpose : "");
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
@@ -165,7 +167,8 @@ async function genInterfaceContract(llm, spec, mod) {
     const obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
     const ports = Array.isArray(obj.ports) ? obj.ports.filter((p) => p && p.name) : [];
     const parameters = Array.isArray(obj.parameters) ? obj.parameters.filter((p) => p && p.name) : [];
-    return ports.length ? { parameters, ports } : null; // no ports -> nothing to scaffold
+    const reset = obj.reset && typeof obj.reset === "object" ? obj.reset : null;
+    return { parameters, ports, reset }; // reset kept even when there are no ports
   } catch (e) { return null; }
 }
 
@@ -561,6 +564,12 @@ async function checkConformance(llm, spec, mod, summary) {
 // sensitivity list, e.g. "@(posedge clk or negedge rst_n)" -> "@(posedge clk)".
 // The "if (!rst_n) ..." logic already inside the block then acts as a SYNCHRONOUS
 // reset. Leaves already-sync code and non-reset signals untouched.
+// True if the code uses an ASYNCHRONOUS reset (a reset edge in the sensitivity list).
+function hasAsyncReset(code) {
+  const c = String(code || "");
+  return /@\s*\(\s*(?:pos|neg)edge\s+\w+\s+or\s+(?:pos|neg)edge\s+\w*(?:rst|reset)\w*/i.test(c) ||
+         /@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s+or\s+(?:pos|neg)edge/i.test(c);
+}
 function stripAsyncReset(code) {
   return String(code)
     .replace(/(@\s*\(\s*(?:pos|neg)edge\s+\w+)\s+or\s+(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(\))/gi, "$1$2")
@@ -1070,14 +1079,32 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
     // Builder can't drop parameters or hardcode widths — it only writes the body.
     // The Verifier LLM extracts the interface (it owns the spec); null -> the Builder
     // writes the whole module as before (graceful fallback).
-    let header = null;
+    let header = null, contract = null;
     try {
-      const contract = await genInterfaceContract(verifierLLM, spec, mod);
-      header = contract ? buildHeader(mod.name, contract) : null;
+      contract = await genInterfaceContract(verifierLLM, spec, mod);
+      header = (contract && contract.ports && contract.ports.length) ? buildHeader(mod.name, contract) : null;
     } catch (e) { header = null; }
     const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest, header);
     if (r.ok) {
       builtFiles[r.name] = r.code;
+
+      // DETERMINISTIC RESET FIX (no LLM): if the spec requires a SYNCHRONOUS reset
+      // but the Builder wrote an ASYNCHRONOUS one, strip the reset from the always
+      // sensitivity list in code — before any conformance LLM call sees it.
+      if (contract && contract.reset && /^sync/i.test(contract.reset.type || "") && hasAsyncReset(r.code)) {
+        const fixedCode = stripAsyncReset(r.code);
+        if (fixedCode !== r.code) {
+          const chkFiles = Object.keys(builtFiles).filter((n) => n !== mod.name)
+            .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+          chkFiles.push({ name: mod.name + ".v", code: fixedCode });
+          const chk = await compileVerilog(chkFiles, mod.name);
+          if (chk.ok) {
+            r.code = fixedCode;
+            builtFiles[r.name] = fixedCode;
+            if (onProgress) onProgress({ type: "resetFix", module: mod.name });
+          }
+        }
+      }
       const entry = manifestByName[mod.name];
 
       // Builder describes the module for the Verifier (summary, NOT the code).
