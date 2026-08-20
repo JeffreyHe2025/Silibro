@@ -1445,3 +1445,6 @@ body.console-resizing, body.console-resizing * {
 .build-controls { background: #f1f5f9; border: 1px solid #cbd5e1; }
 .build-controls .btn { background: #334155; color: #fff; }
 .build-controls .btn:disabled { opacity: .6; }
+
+/* Top button greys out when there is no dependency_graph.md */
+#detect-top:disabled { opacity: .4; cursor: default; }

@@ -728,6 +728,7 @@
   function renderFileList() {
     fileList.innerHTML = "";
     filesEmpty.classList.toggle("hidden", files.length > 0);
+    if (typeof updateTopButton === "function") updateTopButton(); // Top depends on the graph existing
     var topId = resolveTop();
     // Show the declared top file first, then the rest alphabetically.
     // module_map.json is derived metadata for the 🧩 Modules view — keep it out of the list.
@@ -4188,49 +4189,80 @@
   });
 
   // Ask the LLM which file holds the top-level DESIGN module (not a testbench).
-  async function detectTopWithAI() {
-    if (currentProjectId == null) { alert("Open a project first."); return; }
-    var provider = currentProvider();
-    var key = getProviderKey(provider);
-    if (!key) { alert("Connect an LLM first — open the assistant (💬) and add an API key."); return; }
-    syncCurrentFileFromEditor();
-    var vfiles = files.filter(function (f) { return isVerilogName(f.name); });
-    if (!vfiles.length) { alert("No Verilog files to analyze."); return; }
-
-    var sys = "You analyze a Verilog project and identify the TOP-LEVEL DESIGN module — the root of the design hierarchy, NOT a testbench. " +
-      "Ignore testbenches entirely when judging connectivity: multiple independent testbenches do NOT make the project 'disconnected' — a project commonly has one design plus several testbenches for it. " +
-      "Consider only the non-testbench (design) modules. If they reduce to a single root design module (one not instantiated by any other design module), reply with ONLY that file's filename. " +
-      "Only reply with exactly NONE if there are multiple genuinely separate, unconnected DESIGN modules (not testbenches).";
-    var userMsg = "Which file holds the top-level design module (not a testbench)?\n\n";
-    vfiles.forEach(function (f) { userMsg += "--- " + f.name + " ---\n" + (f.code || "") + "\n\n"; });
-
-    var prev = detectTopBtn.textContent;
-    detectTopBtn.disabled = true;
-    detectTopBtn.textContent = "…";
-    try {
-      var model = getProviderModel(provider);
-      var reply = await callLLM(provider, key, model, sys, [{ role: "user", content: userMsg }]);
-      var clean = (reply || "").trim();
-      if (/^none\b/i.test(clean)) { alert("No top module found."); return; }
-      var f = vfiles.find(function (x) { return x.name === clean; });
-      if (!f) {
-        var mentioned = vfiles.filter(function (x) { return x.name && clean.indexOf(x.name) !== -1; });
-        var nonTb = mentioned.filter(function (x) { return x.name.toLowerCase().indexOf("tb_") !== 0; });
-        f = nonTb[0] || mentioned[0];
-      }
-      if (!f) { consoleLog("🔎 no top module found", "warn"); alert("No top module found."); return; }
-      setDeclaredTop(f.id, "user");
-      renderFileList();
-      consoleLog("🔎 top module: " + f.name, "ok");
-    } catch (err) {
-      alert("Couldn't detect top: " + (err.message || err));
-    } finally {
-      detectTopBtn.disabled = false;
-      detectTopBtn.textContent = prev;
+  // Find the TOP module from dependency_graph.md (no LLM): the module that nothing
+  // else instantiates. Parses both the "## Modules" list and the mermaid edges.
+  function parseTopFromDepGraph(md) {
+    if (!md) return null;
+    var deps = {}, allNames = {}, isDep = {};
+    function addDep(a, b) {
+      allNames[a] = true; allNames[b] = true;
+      if (!deps[a]) deps[a] = [];
+      if (deps[a].indexOf(b) < 0) deps[a].push(b);
+      isDep[b] = true;
     }
+    md.split("\n").forEach(function (line) {
+      // Modules list:  - **name** ... → instantiates: a, b   |  depends on: a, b  |  leaf/none
+      var mm = /^\s*[-*]\s*\*\*([A-Za-z_]\w*)\*\*/.exec(line);
+      if (mm) {
+        var name = mm[1]; allNames[name] = true; if (!deps[name]) deps[name] = [];
+        var dm = /(?:instantiates|depends on)\s*:\s*(.+)$/i.exec(line);
+        if (dm && !/\bnone\b/i.test(dm[1])) {
+          dm[1].split(",").forEach(function (t) {
+            var d = t.trim().replace(/[`*]/g, "").replace(/\s.*$/, "");
+            if (/^[A-Za-z_]\w*$/.test(d)) addDep(name, d);
+          });
+        }
+        return;
+      }
+      // Mermaid edge:  A --> B  (A instantiates B)
+      var em = /^\s*([A-Za-z_]\w*)\s*--?>\s*([A-Za-z_]\w*)/.exec(line);
+      if (em) addDep(em[1], em[2]);
+    });
+    var names = Object.keys(allNames);
+    if (!names.length) return null;
+    var roots = names.filter(function (n) { return !isDep[n]; });
+    if (roots.length === 1) return roots[0];
+    // multiple roots: a real top wires submodules — prefer the one WITH dependencies
+    var withDeps = roots.filter(function (n) { return (deps[n] || []).length > 0; });
+    if (withDeps.length === 1) return withDeps[0];
+    return null; // ambiguous (0 roots = cycle, or multiple independent roots)
   }
 
-  detectTopBtn.addEventListener("click", detectTopWithAI);
+  // Enable the Top button only when a dependency_graph.md is present.
+  function depGraphFile() {
+    return files.find(function (f) { return /^dependency_graph\.md$/i.test(f.name) && (f.code || "").trim(); });
+  }
+  function updateTopButton() {
+    if (!detectTopBtn) return;
+    var has = !!depGraphFile();
+    detectTopBtn.disabled = !has;
+    detectTopBtn.title = has
+      ? "Find the top-level module from dependency_graph.md"
+      : "No dependency_graph.md — run Verify & Build to generate one";
+  }
+
+  function detectTopFromGraph() {
+    if (currentProjectId == null) { alert("Open a project first."); return; }
+    var gf = depGraphFile();
+    if (!gf) { alert("No dependency_graph.md found. Run Verify & Build to generate one."); return; }
+    var topName = parseTopFromDepGraph(gf.code);
+    if (!topName) {
+      consoleLog("🔎 no single top module in dependency_graph.md (multiple independent roots?)", "warn");
+      alert("Couldn't identify a single top module from the dependency graph.");
+      return;
+    }
+    var f = fileForModule(topName);
+    if (!f) {
+      consoleLog("🔎 top module '" + topName + "' has no matching Verilog file", "warn");
+      alert("Top module '" + topName + "' (from the graph) has no matching .v file.");
+      return;
+    }
+    setDeclaredTop(f.id, "graph");
+    renderFileList();
+    consoleLog("🔎 top module: " + f.name + " (" + topName + ", from dependency_graph.md)", "ok");
+  }
+
+  detectTopBtn.addEventListener("click", detectTopFromGraph);
 
   signOutBtn.addEventListener("click", function () { sb.auth.signOut(); });
   (function () { var b = $("add-credits"); if (b) b.addEventListener("click", startTopup); })();
