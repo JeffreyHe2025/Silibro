@@ -9,7 +9,7 @@
 // (all the modules it instantiates already exist and have compiled).
 
 const { callLLM } = require("./llm");
-const { compileVerilog, lintVerilog, synthCheck, runTestbench } = require("./compile");
+const { compileVerilog, lintVerilog, synthCheck, runTestbench, runVerilatorCoverage } = require("./compile");
 const { parseInterface, genSmokeTestbench } = require("./smoketb");
 
 // Pull the Verilog out of a ```verilog / ```systemverilog / ```file:... block
@@ -1256,6 +1256,23 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
               await localizeAndFix(llm, verifierLLM, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
             } catch (e) { entry.funcTbOutput = String((e && e.message) || e); }
             entry.verification = entry.verification === "functional" ? "functional" : "unverified";
+
+            // Verilator line-coverage for the oracle testbench (functional tier only,
+            // DISPLAY-ONLY — not fed back to the Verifier). Best-effort: never blocks.
+            if (entry.funcTb) {
+              if (onProgress) onProgress({ type: "coverageStart", module: mod.name });
+              try {
+                const covFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+                covFiles.push({ name: "cov_tb.v", code: entry.funcTb });
+                const covTop = tbTopName(entry.funcTb, mod.name);
+                const cov = await runVerilatorCoverage(covFiles, covTop, mod.name);
+                entry.coverage = cov;
+                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason });
+              } catch (e) {
+                entry.coverage = { available: true, ran: false, reason: String((e && e.message) || e) };
+                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: true, ran: false, reason: entry.coverage.reason });
+              }
+            }
           } else {
             entry.verification = "unverified"; // not synthesizable/lint-clean → can't be functional
           }

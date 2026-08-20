@@ -4,6 +4,8 @@
 // runs `iverilog` and reports whether it compiled, plus any error output.
 
 const { execFile } = require("child_process");
+const { promisify } = require("util");
+const pexecFile = promisify(execFile);
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -568,4 +570,69 @@ function synthesizeProject(files, opts) {
   });
 }
 
-module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, synthesizeProject, findTopDesignModule, runTestbench };
+// Verilator line-coverage for a module + its (self-running) oracle testbench.
+// Best-effort and DISPLAY-ONLY: never throws — returns { available:false } when
+// Verilator isn't installed, { ran:false, reason } when the design/testbench isn't
+// Verilator-compatible, or { ran:true, percent, summary, annotated } on success.
+//   files: [{name, code}] (module + deps + the testbench)  tbTop: testbench top module
+//   moduleName: the DUT module (its annotated source is returned)
+async function runVerilatorCoverage(files, tbTop, moduleName) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vcov-"));
+  const cleanup = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} };
+  try {
+    const names = files.map((fl) => { fs.writeFileSync(path.join(dir, fl.name), fl.code || ""); return fl.name; });
+
+    // 1) Build a coverage-instrumented simulator. --timing handles #delays / @(edge).
+    try {
+      await pexecFile("verilator", [
+        "--binary", "--coverage", "--timing",
+        "--top-module", tbTop,
+        "-Mdir", "obj", "-Wno-fatal", "-Wno-lint", "--quiet",
+        ...names,
+      ], { cwd: dir, timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
+    } catch (e) {
+      if (e && e.code === "ENOENT") { cleanup(); return { available: false, reason: "verilator not installed on the backend" }; }
+      cleanup();
+      return { available: true, ran: false, reason: "verilator build failed (design/testbench not Verilator-compatible)",
+        output: String((e.stderr || e.stdout || e.message || e)).slice(0, 1500) };
+    }
+
+    // 2) Run it — writes coverage.dat into the run cwd (the temp dir).
+    try {
+      await pexecFile(path.join(dir, "obj", "V" + tbTop), [], { cwd: dir, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
+    } catch (e) { /* a $finish/nonzero exit is fine; we check for coverage.dat next */ }
+    if (!fs.existsSync(path.join(dir, "coverage.dat"))) { cleanup(); return { available: true, ran: false, reason: "no coverage.dat produced (testbench may not have run)" }; }
+
+    // 3) Annotate + summary.
+    let summary = "";
+    try {
+      const r = await pexecFile("verilator_coverage", ["--annotate", "annot", "coverage.dat"], { cwd: dir, timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
+      summary = ((r.stdout || "") + (r.stderr || ""));
+    } catch (e) { summary = String((e.stdout || "") + (e.stderr || "")); }
+
+    let percent = null;
+    const pm = /all attached points covered\s*:\s*([\d.]+)%/i.exec(summary);
+    if (pm) percent = parseFloat(pm[1]);
+
+    let annotated = "";
+    try { annotated = fs.readFileSync(path.join(dir, "annot", moduleName + ".v"), "utf8"); } catch (_) {}
+
+    // Friendlier "lines executed" metric: % of coverage-instrumented lines hit at
+    // least once (each annotated line starts with %<count>; %000000 = never hit).
+    let hitLines = 0, totalLines = 0, linePercent = null;
+    annotated.split("\n").forEach((ln) => {
+      const m = /^%(\d+)/.exec(ln);
+      if (m) { totalLines++; if (parseInt(m[1], 10) > 0) hitLines++; }
+    });
+    if (totalLines > 0) linePercent = Math.round((hitLines / totalLines) * 1000) / 10;
+
+    cleanup();
+    return { available: true, ran: true, percent, linePercent, hitLines, totalLines,
+      summary: summary.trim().slice(0, 2000), annotated: annotated.slice(0, 20000) };
+  } catch (e) {
+    cleanup();
+    return { available: true, ran: false, reason: String((e && e.message) || e) };
+  }
+}
+
+module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, synthesizeProject, findTopDesignModule, runTestbench, runVerilatorCoverage };

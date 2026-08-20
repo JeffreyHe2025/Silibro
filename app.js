@@ -2017,6 +2017,13 @@
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
       }
       // final-attempt failure is reported by the 'built' event below
+    } else if (ev.type === "coverageStart") {
+      consoleLog("   • coverage: running Verilator…", "info");
+    } else if (ev.type === "coverage") {
+      if (ev.available === false) consoleLog("   • coverage: skipped (Verilator not installed on the backend)", "warn");
+      else if (!ev.ran) consoleLog("   • coverage: couldn't run" + (ev.reason ? " — " + ev.reason : ""), "warn");
+      else consoleLog("   • coverage: " + (ev.linePercent != null ? ev.linePercent + "% lines executed" : "measured") +
+        (ev.hitLines != null ? " (" + ev.hitLines + "/" + ev.totalLines + ")" : ""), "ok");
     } else if (ev.type === "resetFix") {
       consoleLog("🔧 " + ev.module + ": reset auto-corrected in code (async → synchronous, no LLM call)", "ok");
     } else if (ev.type === "file") {
@@ -2191,7 +2198,7 @@
       return {
         name: m.name, purpose: m.purpose, dependsOn: m.dependsOn, tier: m.tier,
         verification: m.verification, complexity: m.complexity, summary: m.summary,
-        funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code,
+        funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code, coverage: m.coverage,
         funcTbPassed: m.funcTbPassed, smokeSimPassed: m.smokeSimPassed,
       };
     });
@@ -2268,7 +2275,7 @@
       var modMap = data.manifest.map(function (m) {
         return { name: m.name, purpose: m.purpose, dependsOn: m.dependsOn, tier: m.tier,
           verification: m.verification, complexity: m.complexity, summary: m.summary,
-          funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code,
+          funcTb: m.funcTb, smokeTb: m.smokeTb, code: m.code, coverage: m.coverage,
           funcTbPassed: m.funcTbPassed, smokeSimPassed: m.smokeSimPassed };
       });
       edits.push({ name: "module_map.json", content: JSON.stringify(modMap) });
@@ -3898,6 +3905,22 @@
     var f = fileForModule(name);
     return f ? (f.code || "") : null;
   }
+  // Format a stored Verilator coverage result for the Modules "Coverage" tab.
+  function formatCoverage(cov) {
+    if (!cov) return "(no coverage)";
+    if (cov.available === false)
+      return "⚠ Coverage unavailable — Verilator is not installed on the backend.\nInstall it on the server (e.g. apt/brew install verilator) to enable per-module line coverage.";
+    if (!cov.ran)
+      return "⚠ Coverage couldn't run for this module:\n" + (cov.reason || "unknown") +
+        (cov.output ? "\n\n" + cov.output : "");
+    var head = "Line coverage: " + (cov.linePercent != null ? cov.linePercent + "%" : "n/a") +
+      (cov.hitLines != null ? "   (" + cov.hitLines + "/" + cov.totalLines + " instrumented lines executed at least once)" : "");
+    var strict = cov.percent != null ? "\nLines fully covered (all branch/points hit): " + cov.percent + "%" : "";
+    var body = cov.annotated
+      ? "\n\n--- annotated source (leading count = times executed; %000000 = never hit) ---\n" + cov.annotated
+      : (cov.summary ? "\n\n" + cov.summary : "");
+    return head + strict + body;
+  }
   function isTestbenchStale(m) {
     if (!m || m.fromScan) return false;             // scanned modules have no testbench
     if (!m.funcTb && !m.smokeTb) return false;       // nothing to be stale
@@ -4004,6 +4027,7 @@
       { key: "smoke", label: "Smoke test", text: m.smokeTb || "(no smoke test)" },
       { key: "summary", label: "Summary", text: m.summary ? JSON.stringify(m.summary, null, 2) : "(no summary)" }
     );
+    if (m.coverage) tabs.push({ key: "coverage", label: "Coverage", text: formatCoverage(m.coverage) });
     var tabBar = document.createElement("div"); tabBar.className = "mod-tabs";
     var pre = document.createElement("pre"); pre.className = "mod-code";                 // read-only tabs
     var edEl = document.createElement("div"); edEl.className = "mod-code mod-code-editor hidden"; // editable code tab
