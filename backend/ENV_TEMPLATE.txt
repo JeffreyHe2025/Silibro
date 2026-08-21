@@ -32,3 +32,8 @@ APP_URL=https://YOUR-AMPLIFY-DOMAIN   # frontend origin, for Stripe redirect bac
 # globally or bump one user:
 #   alter table billing_accounts alter column monthly_token_cap set default 200000;
 #   update billing_accounts set monthly_token_cap = 200000 where user_id = '...';
+
+# Secret shared with the leaderboard harness so its automated monthly runs can
+# invoke Bedrock without a user login or credit charge (cost goes to your AWS bill).
+# Generate a long random value: `openssl rand -hex 32`. Leave blank to DISABLE the bypass.
+HARNESS_ADMIN_TOKEN=

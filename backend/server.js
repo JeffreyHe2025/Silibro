@@ -38,8 +38,22 @@ app.use("/billing", billingRouter);
 // positive credit balance; meter the token usage and debit the balance after.
 // For any non-bedrock provider this is a passthrough (BYOK, no metering).
 //   returns { result, balance }  (balance in dollars, or null when not metered)
+// Constant-time compare so the harness-token check isn't timing-attackable.
+function safeEqual(a, b) {
+  a = String(a || ""); b = String(b || "");
+  if (!a || !b || a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch (e) { return false; }
+}
+
 async function withBilling(req, provider, kind, fn) {
   if (provider !== "bedrock") return { result: await fn(), balance: null };
+  // Harness bypass: our own automated benchmark runs Bedrock on our AWS account
+  // with no user session and no credit charge (the InvokeModel cost lands directly
+  // on the AWS bill). Gated by a server-only secret; absent/blank env => disabled.
+  const ht = process.env.HARNESS_ADMIN_TOKEN;
+  if (ht && safeEqual(req.headers["x-harness-token"], ht)) {
+    return { result: await fn(), balance: null };
+  }
   if (!billingReady()) { const e = new Error("billing not configured"); e.status = 500; throw e; }
   const userId = await authUser(req);
   await assertCredits(userId);
