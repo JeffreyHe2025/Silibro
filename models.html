@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Free-Tier Models — Verilog Coder</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #f5f6f8; color: #1c1e21;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .topbar {
+      background: #1f2937; color: #fff; padding: 16px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .topbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    .back-link {
+      color: #cbd5e1; text-decoration: none; font-size: 14px;
+      border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; padding: 6px 12px;
+    }
+    .back-link:hover { background: rgba(255,255,255,0.12); color: #fff; }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 60px; }
+    .intro { color: #4b5563; font-size: 15px; line-height: 1.5; margin: 0 0 20px; }
+    h2.section { font-size: 17px; margin: 30px 0 6px; color: #111827; display: flex; align-items: center; gap: 10px; }
+    .section .prov-badge { font-size: 11px; }
+    .section-sub { color: #6b7280; font-size: 13px; margin: 0 0 12px; }
+    .board {
+      width: 100%; border-collapse: separate; border-spacing: 0;
+      background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;
+    }
+    .board th, .board td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eef0f3; }
+    .board thead th {
+      background: #f8fafc; color: #6b7280; font-size: 12px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .board tbody tr:last-child td { border-bottom: none; }
+    .board tbody tr:hover { background: #f9fafb; }
+    .rank { width: 44px; color: #9ca3af; font-variant-numeric: tabular-nums; }
+    .model { font-weight: 600; }
+    .mid { color: #9ca3af; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+    .board th.num { text-align: right; }
+    .cheapest { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 9px;
+      background: #e7f6ec; color: #1a7f37; font-weight: 700; margin-left: 8px; vertical-align: middle; }
+    .prov-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+    .prov-meta      { background: #eaf1ff; color: #1d4ed8; }
+    .prov-deepseek  { background: #eef2ff; color: #4338ca; }
+    .note {
+      margin-top: 22px; font-size: 12px; color: #92400e; background: #fff8ec;
+      border: 1px solid #f6c177; border-radius: 8px; padding: 10px 12px; line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <h1>🧩 Free-Tier Models</h1>
+    <a class="back-link" href="index.html">← Back to Verilog Coder</a>
+  </header>
+
+  <main class="wrap">
+    <p class="intro">
+      These open models run on your <b>free credit</b> via Amazon Bedrock — no API key or account needed to start.
+      A token costs a different amount on each model, so <b>cheaper models stretch your free credit further</b>
+      (more messages / builds per dollar). Prices are $ per 1&nbsp;million tokens.
+    </p>
+
+    <h2 class="section">Llama <span class="prov-badge prov-meta">Meta</span></h2>
+    <p class="section-sub">Ranked by cost — cheapest (best value on the free tier) first.</p>
+    <table class="board" id="llama-table">
+      <thead>
+        <tr>
+          <th class="rank">#</th><th>Model</th>
+          <th class="num">Input&nbsp;$/1M</th><th class="num">Output&nbsp;$/1M</th><th class="num">Blended&nbsp;$/1M</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2 class="section">DeepSeek <span class="prov-badge prov-deepseek">DeepSeek</span></h2>
+    <p class="section-sub">Ranked by cost per token — cheapest first.</p>
+    <table class="board" id="deepseek-table">
+      <thead>
+        <tr>
+          <th class="rank">#</th><th>Model</th>
+          <th class="num">Input&nbsp;$/1M</th><th class="num">Output&nbsp;$/1M</th><th class="num">Blended&nbsp;$/1M</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div class="note">
+      Prices are <b>approximate</b> Amazon Bedrock list prices (US regions) and may change — verify against the
+      AWS Bedrock pricing page. “Blended” = (input + output) ÷ 2, used only to rank. DeepSeek-V3 / V3.2 Bedrock
+      prices are estimates; update the numbers in this file’s <code>MODELS</code> data if they differ.
+    </div>
+  </main>
+
+  <script>
+    // Edit prices here ($ per 1,000,000 tokens). id = the exact Bedrock model id.
+    var MODELS = {
+      llama: [
+        { name: "Llama 3.1 8B",     id: "us.meta.llama3-1-8b-instruct-v1:0",       in: 0.22, out: 0.22 },
+        { name: "Llama 4 Scout",    id: "us.meta.llama4-scout-17b-instruct-v1:0",  in: 0.17, out: 0.66 },
+        { name: "Llama 4 Maverick", id: "us.meta.llama4-maverick-17b-instruct-v1:0",in: 0.24, out: 0.97 },
+        { name: "Llama 3.3 70B",    id: "meta.llama3-3-70b-instruct-v1:0",         in: 0.72, out: 0.72 },
+        { name: "Llama 3.1 70B",    id: "us.meta.llama3-1-70b-instruct-v1:0",      in: 0.72, out: 0.72 }
+      ],
+      deepseek: [
+        { name: "DeepSeek-V3.2", id: "deepseek.v3.2",        in: 0.28, out: 0.42 },
+        { name: "DeepSeek-V3",   id: "deepseek.v3-v1:0",     in: 0.58, out: 1.68 },
+        { name: "DeepSeek-R1",   id: "us.deepseek.r1-v1:0",  in: 1.35, out: 5.40 }
+      ]
+    };
+    function blended(m) { return (m.in + m.out) / 2; }
+    function fmt(n) { return "$" + n.toFixed(n < 1 ? 3 : 2); }
+    function render(list, tbodySel) {
+      var rows = list.slice().sort(function (a, b) { return blended(a) - blended(b); });
+      var tb = document.querySelector(tbodySel + " tbody");
+      tb.innerHTML = "";
+      rows.forEach(function (m, i) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          '<td class="rank">' + (i + 1) + '</td>' +
+          '<td><span class="model">' + m.name + (i === 0 ? '<span class="cheapest">Best value</span>' : '') +
+            '</span><br><span class="mid">' + m.id + '</span></td>' +
+          '<td class="num">' + fmt(m.in) + '</td>' +
+          '<td class="num">' + fmt(m.out) + '</td>' +
+          '<td class="num">' + fmt(blended(m)) + '</td>';
+        tb.appendChild(tr);
+      });
+    }
+    render(MODELS.llama, "#llama-table");
+    render(MODELS.deepseek, "#deepseek-table");
+  </script>
+</body>
+</html>

@@ -2728,13 +2728,19 @@
 
   var PROVIDER_INFO = {
     bedrock: {
-      model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
-      account: true, // no BYOK key — uses the signed-in user's prepaid credits
-      hint: "No API key needed — free tokens to start (no account required). The app calls Amazon Bedrock for you; sign in for a larger monthly allowance.",
+      model: "us.meta.llama3-3-70b-instruct-v1:0",
+      account: true, // no BYOK key — uses free credit (guest) or the account's credit
+      hint: "No API key needed — free credit to start (no account required). Runs open models on Amazon Bedrock; sign in for a larger monthly allowance.",
       models: [
-        "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "anthropic.claude-3-5-haiku-20241022-v1:0",
-        "anthropic.claude-3-haiku-20240307-v1:0",
+        "us.meta.llama3-3-70b-instruct-v1:0",
+        "us.meta.llama4-maverick-17b-instruct-v1:0",
+        "us.meta.llama4-scout-17b-instruct-v1:0",
+        "us.deepseek.r1-v1:0",
+        "us.amazon.nova-pro-v1:0",
+        "us.mistral.pixtral-large-2502-v1:0",
+        "us.amazon.nova-lite-v1:0",
+        "us.amazon.nova-micro-v1:0",
+        "us.meta.llama3-1-8b-instruct-v1:0",
       ],
     },
     openrouter: {
@@ -2994,6 +3000,18 @@
     setConnectedButtons(chatHasKey());
   }
 
+  // Friendly display names for Bedrock model IDs (raw ids are ugly).
+  var MODEL_LABELS = {
+    "us.meta.llama3-3-70b-instruct-v1:0": "Llama 3.3 70B",
+    "us.meta.llama4-maverick-17b-instruct-v1:0": "Llama 4 Maverick",
+    "us.meta.llama4-scout-17b-instruct-v1:0": "Llama 4 Scout",
+    "us.meta.llama3-1-8b-instruct-v1:0": "Llama 3.1 8B",
+    "us.deepseek.r1-v1:0": "DeepSeek-R1",
+    "us.amazon.nova-pro-v1:0": "Amazon Nova Pro",
+    "us.amazon.nova-lite-v1:0": "Amazon Nova Lite",
+    "us.amazon.nova-micro-v1:0": "Amazon Nova Micro",
+    "us.mistral.pixtral-large-2502-v1:0": "Mistral Pixtral Large"
+  };
   // Fill the model dropdown with popular models for the chosen provider.
   function populateModelList(provider) {
     var models = (PROVIDER_INFO[provider] || PROVIDER_INFO.openrouter).models || [];
@@ -3001,6 +3019,7 @@
     models.forEach(function (m) {
       var opt = document.createElement("option");
       opt.value = m;
+      if (MODEL_LABELS[m]) opt.label = MODEL_LABELS[m];
       chatModelList.appendChild(opt);
     });
   }

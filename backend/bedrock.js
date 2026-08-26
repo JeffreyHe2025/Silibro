@@ -26,7 +26,20 @@ function client() {
 // BILLING_MARKUP (e.g. 1.4 = 40% margin) to cover overhead + margin.
 const MARKUP = parseFloat(process.env.BILLING_MARKUP || "1.4");
 const PRICING = {
-  // modelId : { in: $/1M input tok, out: $/1M output tok }
+  // modelId (or a substring of it) : { in: $/1M input tok, out: $/1M output tok }
+  // --- Bedrock open models offered on the free tier (approx US on-demand list) --
+  "llama3-3-70b":   { in: 0.72,  out: 0.72 },
+  "llama4-maverick":{ in: 0.24,  out: 0.97 },
+  "llama4-scout":   { in: 0.17,  out: 0.66 },
+  "llama3-1-8b":    { in: 0.22,  out: 0.22 },
+  "deepseek.r1":    { in: 1.35,  out: 5.40 },
+  "deepseek.v3.2":  { in: 0.28,  out: 0.42 },
+  "deepseek.v3":    { in: 0.58,  out: 1.68 },
+  "nova-pro":       { in: 0.80,  out: 3.20 },
+  "nova-lite":      { in: 0.06,  out: 0.24 },
+  "nova-micro":     { in: 0.035, out: 0.14 },
+  "pixtral-large":  { in: 2.0,   out: 6.0 },
+  // --- legacy Claude entries (kept for any paid/BYOK-via-Bedrock use) ----------
   "anthropic.claude-3-5-sonnet-20241022-v2:0": { in: 3.0, out: 15.0 },
   "anthropic.claude-3-5-haiku-20241022-v1:0": { in: 0.8, out: 4.0 },
   "anthropic.claude-3-haiku-20240307-v1:0": { in: 0.25, out: 1.25 },
