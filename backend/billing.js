@@ -132,7 +132,7 @@ async function chargeUsage(userId, kind, usage) {
 // Caps the owner's AWS exposure for the FREE tier. Logged cost_micros already
 // includes BILLING_MARKUP, so convert the $ cap into logged units to track the
 // real AWS bill. Set FREE_TIER_MONTHLY_CAP_USD=0 (or blank) to disable the cap.
-const FREE_TIER_CAP_USD = parseFloat(process.env.FREE_TIER_MONTHLY_CAP_USD || "600");
+const FREE_TIER_CAP_USD = parseFloat(process.env.FREE_TIER_MONTHLY_CAP_USD || "250");
 const FREE_TIER_CAP_MICROS = Math.round(FREE_TIER_CAP_USD * 1e6); // logged spend is raw AWS $
 
 async function freeTierSpendMicros() {

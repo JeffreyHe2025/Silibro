@@ -53,7 +53,7 @@ ANON_FREE_TIER=on
 # month's Bedrock spend crosses this, NEW free users (who haven't started this
 # month) get a "try next month" notice; users already mid-quota keep going. Set 0
 # to disable. Requires sitewide-cap.sql. Tracks real AWS $ (accounts for markup).
-FREE_TIER_MONTHLY_CAP_USD=600
+FREE_TIER_MONTHLY_CAP_USD=250
 # The per-user free grant ($0.85/month) lives in the DB (free-credits.sql); change
 # it there: alter table billing_accounts alter column monthly_token_cap set default <micros>;
 ANON_COOKIE_SECRET=
