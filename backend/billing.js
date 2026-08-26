@@ -51,6 +51,43 @@ async function authUser(req) {
   return data.user.id;
 }
 
+// Like authUser but NON-throwing: returns the user id if a valid Bearer JWT is
+// present, else null (no token, or invalid/expired). Lets a handler fall back to
+// the anonymous free tier instead of rejecting.
+async function authUserOptional(req) {
+  const h = req.headers["authorization"] || "";
+  if (!h.startsWith("Bearer ")) return null;
+  try { return await authUser(req); } catch (e) { return null; }
+}
+
+// ---- Anonymous (cookie-tracked) free tier ----------------------------------
+// Mirrors the signed-in token free tier, but keyed on a random anon_id the
+// backend keeps in a signed httpOnly cookie. No IP involved.
+async function anonStatus(anonId) {
+  const { data, error } = await admin.rpc("usage_status_anon", { p_anon: anonId });
+  if (error || !data) return { tokens_remaining: 0, monthly_token_cap: 0, tokens_used: 0 };
+  return data;
+}
+async function assertCreditsAnon(anonId) {
+  const { data, error } = await admin.rpc("can_spend_anon", { p_anon: anonId });
+  if (error) throw new Error("quota check failed: " + error.message);
+  if (data !== true) { const e = new Error("free token limit reached — sign in for more"); e.status = 402; throw e; }
+  return true;
+}
+async function chargeUsageAnon(anonId, kind, usage) {
+  const { rawCostMicros } = require("./bedrock");
+  const model = (usage && usage.model) || "";
+  const inTok = (usage && usage.inputTokens) || 0;
+  const outTok = (usage && usage.outputTokens) || 0;
+  if (!inTok && !outTok) return Number((await anonStatus(anonId)).tokens_remaining || 0);
+  const cost = rawCostMicros(model, inTok, outTok); // real AWS $ (free tier, no markup)
+  const { data, error } = await admin.rpc("charge_anon", {
+    p_anon: anonId, p_cost: cost, p_kind: kind, p_model: model, p_in: inTok, p_out: outTok,
+  });
+  if (error) throw new Error("charge failed: " + error.message);
+  return Number((data && data.tokens_remaining) || 0);
+}
+
 // ---- Balance / enforcement --------------------------------------------------
 // Full status: monthly free allowance + prepaid credits (all micros). Rolls the
 // period server-side so a new month frees the user up automatically.
@@ -78,17 +115,36 @@ async function assertCredits(userId) {
 // Draws from the free monthly allowance first, then prepaid credits. Returns the
 // remaining spendable balance (micros) for the inline badge update.
 async function chargeUsage(userId, kind, usage) {
-  const { costMicros } = require("./bedrock");
+  const { rawCostMicros } = require("./bedrock");
   const model = (usage && usage.model) || "";
   const inTok = (usage && usage.inputTokens) || 0;
   const outTok = (usage && usage.outputTokens) || 0;
   if (!inTok && !outTok) return await getBalance(userId); // nothing happened
-  const cost = costMicros(model, inTok, outTok);
+  const cost = rawCostMicros(model, inTok, outTok); // real AWS $ (free tier, no markup)
   const { data, error } = await admin.rpc("charge_user", {
     p_user: userId, p_cost: cost, p_kind: kind, p_model: model, p_in: inTok, p_out: outTok,
   });
   if (error) throw new Error("charge failed: " + error.message);
   return Number((data && data.tokens_remaining) || 0);
+}
+
+// ---- Sitewide monthly free-tier spend cap -----------------------------------
+// Caps the owner's AWS exposure for the FREE tier. Logged cost_micros already
+// includes BILLING_MARKUP, so convert the $ cap into logged units to track the
+// real AWS bill. Set FREE_TIER_MONTHLY_CAP_USD=0 (or blank) to disable the cap.
+const FREE_TIER_CAP_USD = parseFloat(process.env.FREE_TIER_MONTHLY_CAP_USD || "600");
+const FREE_TIER_CAP_MICROS = Math.round(FREE_TIER_CAP_USD * 1e6); // logged spend is raw AWS $
+
+async function freeTierSpendMicros() {
+  if (!admin) return 0;
+  const { data, error } = await admin.rpc("free_tier_spend_micros");
+  if (error) return 0;
+  return Number(data || 0);
+}
+// True while this month's free-tier spend is under the cap (or the cap is off).
+async function freeTierOpen() {
+  if (!FREE_TIER_CAP_MICROS) return true;
+  return (await freeTierSpendMicros()) < FREE_TIER_CAP_MICROS;
 }
 
 // Find or create the user's Stripe customer, remembering it on the account row.
@@ -115,6 +171,7 @@ billingRouter.get("/account", async (req, res) => {
       tokens_remaining: Number(st.tokens_remaining || 0),
       monthly_token_cap: Number(st.monthly_token_cap || 0),
       tokens_used: Number(st.tokens_used || 0),
+      siteOpen: await freeTierOpen(), // false once the month's sitewide pool is spent
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
@@ -189,6 +246,9 @@ const billingWebhook = [
 ];
 
 module.exports = {
-  billingReady, authUser, getBalance, getStatus, assertCredits, chargeUsage,
+  billingReady, authUser, authUserOptional, assertCredits, chargeUsage,
+  getBalance, getStatus,
+  anonStatus, assertCreditsAnon, chargeUsageAnon,
+  freeTierOpen, freeTierSpendMicros,
   billingRouter, billingWebhook,
 };

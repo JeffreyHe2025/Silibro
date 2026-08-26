@@ -49,6 +49,13 @@ function costMicros(model, inTok, outTok) {
   return Math.ceil(MARKUP * ((inTok || 0) * p.in + (outTok || 0) * p.out));
 }
 
+// RAW AWS cost (no markup), in micros. The free tier debits this — it's the real
+// dollars the owner pays AWS, with no paid-user margin applied.
+function rawCostMicros(model, inTok, outTok) {
+  const p = priceFor(model);
+  return Math.ceil((inTok || 0) * p.in + (outTok || 0) * p.out);
+}
+
 function parseDataUrl(url) {
   const m = String(url).match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return { mediaType: "image/jpeg", data: "" };
@@ -103,4 +110,4 @@ async function callBedrock({ model, system, messages, temperature }) {
   return { text, usage };
 }
 
-module.exports = { callBedrock, costMicros, priceFor, REGION };
+module.exports = { callBedrock, costMicros, rawCostMicros, priceFor, REGION, MARKUP };

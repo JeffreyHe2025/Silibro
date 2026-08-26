@@ -37,3 +37,24 @@ APP_URL=https://YOUR-AMPLIFY-DOMAIN   # frontend origin, for Stripe redirect bac
 # invoke Bedrock without a user login or credit charge (cost goes to your AWS bill).
 # Generate a long random value: `openssl rand -hex 32`. Leave blank to DISABLE the bypass.
 HARNESS_ADMIN_TOKEN=
+
+# ---- Anonymous (no-account) free tier -----------------------------------------
+# Guests get a small monthly Bedrock allowance tracked by a signed httpOnly cookie
+# (per browser, NOT per IP). Run anon-freetier.sql once to create the tables.
+#   ANON_FREE_TIER=off   -> disable the guest tier entirely (default: on)
+#   ANON_COOKIE_SECRET   -> HMAC key for the cookie (falls back to the Supabase
+#                           service_role key if blank; set a dedicated one to rotate
+#                           guest sessions without touching Supabase)
+#   ALLOWED_ORIGINS      -> comma-separated frontend origins allowed to send the
+#                           cookie (e.g. https://main.xxxx.amplifyapp.com). Blank =
+#                           reflect any origin (fine to start).
+ANON_FREE_TIER=on
+# Sitewide monthly cap (USD) on the owner's AWS spend for the FREE tier. Once the
+# month's Bedrock spend crosses this, NEW free users (who haven't started this
+# month) get a "try next month" notice; users already mid-quota keep going. Set 0
+# to disable. Requires sitewide-cap.sql. Tracks real AWS $ (accounts for markup).
+FREE_TIER_MONTHLY_CAP_USD=600
+# The per-user free grant ($0.85/month) lives in the DB (free-credits.sql); change
+# it there: alter table billing_accounts alter column monthly_token_cap set default <micros>;
+ANON_COOKIE_SECRET=
+ALLOWED_ORIGINS=

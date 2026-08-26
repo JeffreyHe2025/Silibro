@@ -548,7 +548,7 @@
       signOutBtn.classList.add("hidden");
       signInBtn.classList.remove("hidden");
       if (addCreditsBtn) addCreditsBtn.classList.add("hidden");
-      updateCreditsBadge(null); // guests can't use Bedrock credits
+      refreshCredits(); // guests: show the per-device free-token badge
     }
     // Reset selection when switching between accounts / guest.
     projects = [];
@@ -1805,7 +1805,8 @@
         try {
           resp = await fetch(base + "/flow/start", {
             method: "POST",
-            headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+            credentials: "include",
+            headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
             body: JSON.stringify({ prompt: fullPrompt, provider: provider, key: key, builderModel: model }),
           });
           break; // successfully connected!
@@ -1919,7 +1920,8 @@
     try {
       var resp = await fetch(base + "/flow/continue", {
         method: "POST",
-        headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+        credentials: "include",
+        headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
         body: JSON.stringify({ threadId: tid, spec: spec, files: vfiles, provider: provider, key: key, builderModel: model, verifierModel: model }),
       });
       var data = await readFlowStream(resp);
@@ -1963,7 +1965,8 @@
         try {
           resp = await fetch(base + "/flow/approve", {
             method: "POST",
-            headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+            credentials: "include",
+            headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
             body: JSON.stringify({ threadId: flowThreadId, approved: approved, changes: changes || "", provider: currentProvider() }),
           });
           break; // successfully connected!
@@ -2308,7 +2311,8 @@
     try {
       var resp = await fetch(base + "/refix", {
         method: "POST",
-        headers: Object.assign({ "Content-Type": "application/json" }, await authHeaders()),
+        credentials: "include",
+        headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
         body: JSON.stringify({ spec: spec, manifest: manifest, review: review, provider: provider, key: key, builderModel: model, verifierModel: model }),
       });
       // A non-stream response (e.g. 404 because the backend isn't updated, or a
@@ -2516,6 +2520,23 @@
   // ---- Backend (EC2) compile checks via iverilog ----
   function getBackendUrl() { return "https://verilogprojectcreate.duckdns.org"; }
 
+  // Stable per-browser id for the anonymous free tier. Lives in localStorage so it
+  // survives closing/reopening the site, and works even where third-party cookies
+  // are blocked (frontend and backend are different sites). Sent as X-Anon-Id.
+  function getAnonId() {
+    var k = "vc_anon_id";
+    var v = localStorage.getItem(k);
+    if (!v) {
+      v = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+        : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+            var r = (Math.random() * 16) | 0, val = c === "x" ? r : (r & 0x3) | 0x8;
+            return val.toString(16);
+          });
+      localStorage.setItem(k, v);
+    }
+    return v;
+  }
+
   // ---- Bedrock prepaid-credits plumbing -------------------------------------
   // The Bedrock provider has no BYOK key: the browser sends the signed-in user's
   // Supabase JWT, the backend calls Bedrock with its own AWS creds, and each call
@@ -2533,13 +2554,12 @@
   function renderCreditsBadge(st) {
     var badge = $("credits-badge");
     if (!badge) return;
-    if (!st || !isSignedIn()) { badge.classList.add("hidden"); return; }
-    var remaining = Number(st.tokens_remaining || 0);
-    var cap = Number(st.monthly_token_cap || 0);
-    function fmt(n) { return n >= 1000 ? Math.round(n / 1000) + "k" : String(n); }
-    badge.textContent = remaining <= 0 ? "Free tokens used up" : "Free: " + fmt(remaining) + " tokens left";
-    badge.title = "Monthly free allowance: " + remaining.toLocaleString() + " of " + cap.toLocaleString() +
-      " tokens left this month (resets on the 1st)";
+    if (!st) { badge.classList.add("hidden"); return; }
+    var remaining = Number(st.tokens_remaining || 0) / 1e6; // micros -> dollars
+    var cap = Number(st.monthly_token_cap || 0) / 1e6;
+    badge.textContent = remaining <= 0 ? "Free credit used up" : "Free: $" + remaining.toFixed(2) + " left";
+    badge.title = "Monthly free credit: $" + remaining.toFixed(2) + " of $" + cap.toFixed(2) +
+      " left this month (resets on the 1st). Spend it on any Bedrock model.";
     badge.classList.remove("hidden");
     badge.classList.toggle("credits-low", remaining <= 0);
   }
@@ -2549,14 +2569,36 @@
     refreshCredits();
   }
   async function refreshCredits() {
-    if (!isSignedIn()) { renderCreditsBadge(null); return; }
+    if (!isSignedIn()) { return refreshGuestCredits(); }
     try {
       var headers = await authHeaders();
       if (!headers.Authorization) return;
       var r = await fetch(getBackendUrl() + "/billing/account", { headers: headers });
       var d = await r.json();
-      if (r.ok) renderCreditsBadge(d);
+      if (r.ok) renderCreditsBadgeSiteAware(d);
     } catch (e) { /* leave badge as-is */ }
+  }
+  // Guests: show the anonymous per-device free-token allowance (cookie-tracked).
+  async function refreshGuestCredits() {
+    try {
+      var r = await fetch(getBackendUrl() + "/billing/anon-account", { credentials: "include", headers: { "X-Anon-Id": getAnonId() } });
+      var d = await r.json();
+      if (r.ok && d && d.enabled) renderCreditsBadgeSiteAware(d); else renderCreditsBadge(null);
+    } catch (e) { renderCreditsBadge(null); }
+  }
+  // Render the token badge, but if the SITEWIDE monthly pool is spent AND this
+  // user hasn't started this month, show a "back next month" notice instead.
+  function renderCreditsBadgeSiteAware(st) {
+    if (st && st.siteOpen === false && Number(st.tokens_used || 0) <= 0) {
+      var badge = $("credits-badge");
+      if (!badge) return;
+      badge.textContent = "Free tier full — back next month";
+      badge.title = "This month's sitewide free allowance is used up. It refreshes on the 1st \u2014 or connect your own API key (\ud83d\udd11) to keep going now.";
+      badge.classList.remove("hidden");
+      badge.classList.add("credits-low");
+      return;
+    }
+    renderCreditsBadge(st);
   }
   async function startTopup() {
     if (!isSignedIn()) { alert("Sign in first to buy credits."); return; }
@@ -2571,7 +2613,11 @@
   // Called when a Bedrock call returns 402. Nudge the user to top up.
   function onOutOfCredits() {
     refreshCredits();
-    alert("You've used your free monthly token allowance. It resets on the 1st \u2014 or connect your own API key (\ud83d\udd11) to keep going now.");
+    if (!isSignedIn()) {
+      alert("You've used the free credit on this device this month. Create a free account for a monthly allowance \u2014 or connect your own API key (\ud83d\udd11) to keep going now.");
+    } else {
+      alert("You've used your free monthly credit. It resets on the 1st \u2014 or connect your own API key (\ud83d\udd11) to keep going now.");
+    }
   }
   // After returning from Stripe Checkout (?topup=success), refresh the balance.
   function handleTopupReturn() {
@@ -2684,7 +2730,7 @@
     bedrock: {
       model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
       account: true, // no BYOK key — uses the signed-in user's prepaid credits
-      hint: "No API key needed — sign in and add credits. The app calls Amazon Bedrock for you and bills your prepaid balance.",
+      hint: "No API key needed — free tokens to start (no account required). The app calls Amazon Bedrock for you; sign in for a larger monthly allowance.",
       models: [
         "anthropic.claude-3-5-sonnet-20241022-v2:0",
         "anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -2746,10 +2792,10 @@
   function currentProvider() { return localStorage.getItem("llm_provider") || "openrouter"; }
   
   function getProviderKey(p) {
-    // Bedrock has no BYOK key: "connected" means signed in (JWT sent per request).
-    // Return a non-secret sentinel so the existing `if (!key)` gates pass; the
-    // backend ignores it and uses the user's auth + its own AWS creds.
-    if (p === "bedrock") return isSignedIn() ? "account" : "";
+    // Bedrock has no BYOK key. Return a non-secret sentinel so the existing
+    // `if (!key)` gates pass for everyone; the backend identifies the caller by
+    // JWT (signed-in) or the anon cookie (guest) and uses its own AWS creds.
+    if (p === "bedrock") return "account";
     var conns = getConnections();
     var activeId = getActiveConnectionId();
     var active = conns.find(function(c) { return c.id === activeId; });
@@ -2825,8 +2871,8 @@
     if (info.account) {
       chatKeyInput.classList.add("hidden");
       chatSetupHint.textContent = isSignedIn()
-        ? "✓ Signed in — Bedrock will use your prepaid credits. Click Connect, then add credits with “+ Credits”."
-        : "Sign in to use Amazon Bedrock — it bills your account's prepaid credits instead of an API key.";
+        ? "✓ Signed in — Bedrock uses your monthly free tokens (then prepaid credits). Just click Connect."
+        : "No account needed — click Connect to use Amazon Bedrock with free tokens on this device. Sign in for a larger monthly allowance.";
       chatKeySave.textContent = "Connect";
       renderSavedKeysList();
       return;
@@ -3208,7 +3254,8 @@
     var provider = chatProvider.value;
     // Bedrock has no key: "connecting" just means selecting it while signed in.
     if (provider === "bedrock") {
-      if (!isSignedIn()) { alert("Sign in first — Bedrock uses your account's prepaid credits, not an API key."); return; }
+      // No sign-in required: guests get a per-device free token allowance
+      // (cookie-tracked); signed-in users get their monthly allowance/credits.
       setActiveConnectionId(null); // Bedrock uses no key — clear any active API key
       localStorage.setItem("llm_provider", "bedrock");
       setProviderModel("bedrock", getProviderModel("bedrock") || PROVIDER_INFO.bedrock.model);
@@ -3279,20 +3326,25 @@
     if (provider === "bedrock") {
       // Server-side call via the backend: browser sends its JWT, backend uses its
       // AWS creds and bills the user's prepaid credits.
-      var bhead = await authHeaders();
-      if (!bhead.Authorization) throw new Error("Sign in to use Amazon Bedrock credits.");
+      var bhead = await authHeaders(); // {} for guests — the anon cookie identifies them
       var bmsgs = history.map(function (m) {
         return { role: m.role, content: m.content || "", images: m.images || [] };
       });
       var br = await fetch(getBackendUrl() + "/bedrock/chat", {
         method: "POST",
-        headers: Object.assign({ "Content-Type": "application/json" }, bhead),
+        credentials: "include",
+        headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, bhead),
         body: JSON.stringify({ model: model, system: system, messages: bmsgs }),
       });
       var bd = await br.json();
-      if (br.status === 402) { onOutOfCredits(); throw new Error("Out of Bedrock credits — add credits to continue."); }
+      if (br.status === 402) {
+        var msg402 = (bd && bd.error) || "Out of free Bedrock tokens.";
+        if (bd && bd.code === "site_closed") { refreshCredits(); alert(msg402); }
+        else onOutOfCredits();
+        throw new Error(msg402);
+      }
       if (!br.ok || bd.error) throw new Error(bd.error || ("Bedrock error " + br.status));
-      if (typeof bd.balance === "number") updateCreditsBadge(bd.balance);
+      refreshCredits(); // updates the user OR guest token badge
       return bd.reply || "";
     }
     if (provider === "anthropic") {

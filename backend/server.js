@@ -18,12 +18,18 @@ const { compileVerilog, compileReport, runTestbench, synthesizeProject } = requi
 const { startFlow, resumeFlow, resolveDecision, requestStop, isStopped } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
 const {
-  billingReady, authUser, assertCredits, chargeUsage,
+  billingReady, authUser, authUserOptional, assertCredits, chargeUsage, getStatus,
+  anonStatus, assertCreditsAnon, chargeUsageAnon,
+  freeTierOpen, freeTierSpendMicros,
   billingRouter, billingWebhook,
 } = require("./billing");
 
 const app = express();
-app.use(cors()); // allow the browser frontend to call this
+// Reflect the caller's Origin and allow credentials so the anonymous free-tier
+// cookie can round-trip cross-site (frontend and backend are different hosts).
+// Restrict to ALLOWED_ORIGINS (comma-separated) if set; else reflect any origin.
+const ALLOW = (process.env.ALLOWED_ORIGINS || "").split(",").map((x) => x.trim()).filter(Boolean);
+app.use(cors({ origin: ALLOW.length ? ALLOW : true, credentials: true }));
 
 // Stripe webhook needs the RAW body for signature verification, so it must be
 // registered BEFORE express.json() parses everything else.
@@ -45,21 +51,106 @@ function safeEqual(a, b) {
   try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch (e) { return false; }
 }
 
-async function withBilling(req, provider, kind, fn) {
-  if (provider !== "bedrock") return { result: await fn(), balance: null };
-  // Harness bypass: our own automated benchmark runs Bedrock on our AWS account
-  // with no user session and no credit charge (the InvokeModel cost lands directly
-  // on the AWS bill). Gated by a server-only secret; absent/blank env => disabled.
-  const ht = process.env.HARNESS_ADMIN_TOKEN;
-  if (ht && safeEqual(req.headers["x-harness-token"], ht)) {
-    return { result: await fn(), balance: null };
+// ---- Anonymous free-tier cookie (signed httpOnly, per-browser; no IP) --------
+const ANON_COOKIE = "vc_anon";
+const ANON_SECRET = process.env.ANON_COOKIE_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+function anonEnabled() { return billingReady() && ANON_SECRET && process.env.ANON_FREE_TIER !== "off"; }
+function signAnon(id) { return crypto.createHmac("sha256", ANON_SECRET).update(id).digest("hex").slice(0, 32); }
+function parseCookies(req) {
+  const out = {}; const h = req.headers.cookie || "";
+  h.split(";").forEach((p) => { const i = p.indexOf("="); if (i > 0) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim()); });
+  return out;
+}
+// Read the anon id from the cookie, but only if OUR signature validates.
+function readAnonId(req) {
+  const c = parseCookies(req)[ANON_COOKIE]; if (!c) return null;
+  const dot = c.lastIndexOf("."); if (dot < 0) return null;
+  const id = c.slice(0, dot), sig = c.slice(dot + 1);
+  if (!ANON_SECRET || signAnon(id) !== sig) return null;
+  return id;
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Return the browser's anon id. Sources, in order of trust:
+//   1. our signed httpOnly cookie (first-party contexts / cookie-allowed browsers)
+//   2. the client's localStorage id via the X-Anon-Id header (works even where
+//      third-party cookies are blocked, e.g. Safari — the frontend and backend are
+//      different sites, so the cookie is third-party there)
+//   3. mint a fresh one.
+// Also (best-effort) sets the cookie so cookie-allowed browsers get the stronger
+// httpOnly identifier. MUST run before res.flushHeaders() so Set-Cookie can go out.
+function ensureAnonId(req, res) {
+  const hdr = req.headers["x-anon-id"];
+  const headerId = UUID_RE.test(String(hdr || "")) ? String(hdr) : null;
+  let id = readAnonId(req) || headerId;
+  if (!id) id = crypto.randomUUID();
+  if (!res.headersSent && !readAnonId(req)) {
+    res.cookie(ANON_COOKIE, id + "." + signAnon(id), {
+      httpOnly: true, secure: true, sameSite: "none",
+      maxAge: 365 * 24 * 3600 * 1000, path: "/",
+    });
   }
+  return id;
+}
+
+// Enforce the personal monthly cap AND the sitewide $500/month soft cap. The
+// sitewide cap only turns AWAY users who have NOT started using free tokens this
+// month (tokens_used == 0); anyone already mid-quota keeps going. Resets monthly.
+async function gateFreeTier(st, isAnon) {
+  const remaining = Number((st && st.tokens_remaining) || 0);
+  const used = Number((st && st.tokens_used) || 0);
+  if (remaining <= 0) {
+    const e = new Error(isAnon
+      ? "You've used the free credit on this device this month."
+      : "You've used your free monthly credit.");
+    e.status = 402; e.code = "quota_exhausted"; throw e;
+  }
+  if (used <= 0 && !(await freeTierOpen())) {
+    const e = new Error("This month's free tier is fully used across all users. Please try again next month \u2014 or connect your own API key to keep going now.");
+    e.status = 402; e.code = "site_closed"; throw e;
+  }
+}
+
+// Decide who pays for a Bedrock call BEFORE any work/streaming, and gate it.
+// Returns a bill context: { mode: "byok"|"harness"|"user"|"anon", userId?, anonId? }.
+// For streaming endpoints, call this BEFORE res.flushHeaders() so the anon cookie
+// and any 402/401 error can be sent as a normal response.
+async function prepareBilling(req, res, provider) {
+  if (provider !== "bedrock") return { mode: "byok" };
+  const ht = process.env.HARNESS_ADMIN_TOKEN;
+  if (ht && safeEqual(req.headers["x-harness-token"], ht)) return { mode: "harness" };
   if (!billingReady()) { const e = new Error("billing not configured"); e.status = 500; throw e; }
-  const userId = await authUser(req);
-  await assertCredits(userId);
+  const userId = await authUserOptional(req);
+  if (userId) {
+    const st = await getStatus(userId);
+    await gateFreeTier(st, false);
+    return { mode: "user", userId: userId };
+  }
+  if (anonEnabled()) {
+    const anonId = ensureAnonId(req, res);
+    const st = await anonStatus(anonId);
+    await gateFreeTier(st, true);
+    return { mode: "anon", anonId: anonId };
+  }
+  const e = new Error("sign in required"); e.status = 401; throw e;
+}
+
+// Run the metered work and settle the charge for a prepared bill context.
+// Returns { result, balance, anonTokensRemaining? }.
+async function runBilled(bill, kind, fn) {
+  if (bill.mode === "byok" || bill.mode === "harness") return { result: await fn(), balance: null };
   const { result, usage } = await runWithUsage(fn);
-  const micros = await chargeUsage(userId, kind, usage);
-  return { result, balance: micros / 1e6 };
+  if (bill.mode === "user") {
+    const micros = await chargeUsage(bill.userId, kind, usage);
+    return { result, balance: micros / 1e6 };
+  }
+  const remaining = await chargeUsageAnon(bill.anonId, kind, usage); // anon
+  return { result, balance: null, anonTokensRemaining: remaining };
+}
+
+// Convenience for NON-streaming handlers: prepare (gate + cookie) then run.
+async function withBilling(req, res, provider, kind, fn) {
+  const bill = await prepareBilling(req, res, provider);
+  return runBilled(bill, kind, fn);
 }
 
 // Which commit is this server running? Compare to the latest on GitHub to know
@@ -200,6 +291,23 @@ app.post("/synthesize", async (req, res) => {
   }
 });
 
+// Guest (anonymous) free-tier status. Ensures the anon cookie exists and returns
+// the browser's remaining free tokens, so the frontend can show a guest badge.
+app.get("/billing/anon-account", async (req, res) => {
+  if (!anonEnabled()) return res.json({ enabled: false });
+  try {
+    const anonId = ensureAnonId(req, res);
+    const st = await anonStatus(anonId);
+    res.json({
+      enabled: true,
+      tokens_remaining: Number(st.tokens_remaining || 0),
+      monthly_token_cap: Number(st.monthly_token_cap || 0),
+      tokens_used: Number(st.tokens_used || 0),
+      siteOpen: await freeTierOpen(), // false once the month's $500 pool is spent
+    });
+  } catch (e) { res.status(500).json({ error: String((e && e.message) || e) }); }
+});
+
 // Single chat turn through Bedrock (server creds), metered against credits.
 // The browser sends its Supabase JWT (Authorization: Bearer …) instead of a key.
 //   body: { model, system?, messages:[{role,content,images?}] }
@@ -210,12 +318,12 @@ app.post("/bedrock/chat", async (req, res) => {
     return res.status(400).json({ error: "model and messages[] are required" });
   }
   try {
-    const { result, balance } = await withBilling(req, "bedrock", "chat", () =>
+    const { result, balance, anonTokensRemaining } = await withBilling(req, res, "bedrock", "chat", () =>
       callLLM({ provider: "bedrock", model, system, messages })
     );
-    res.json({ reply: result, balance });
+    res.json({ reply: result, balance, anonTokensRemaining });
   } catch (e) {
-    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
+    res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code });
   }
 });
 
@@ -227,7 +335,7 @@ app.post("/build", async (req, res) => {
     return res.status(400).json({ error: "spec, provider, model (and key for BYOK) are required" });
   }
   try {
-    const { result: out, balance } = await withBilling(req, provider, "build", async () => {
+    const { result: out, balance, anonTokensRemaining } = await withBilling(req, res, provider, "build", async () => {
       const log = [];
       const built = await buildDesign({ provider, key, model }, spec, (ev) => {
         log.push(ev);
@@ -235,9 +343,9 @@ app.post("/build", async (req, res) => {
       });
       return { ...built, log };
     });
-    res.json({ ...out, balance });
+    res.json({ ...out, balance, anonTokensRemaining });
   } catch (e) {
-    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
+    res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code });
   }
 });
 
@@ -251,6 +359,10 @@ app.post("/refix", async (req, res) => {
   if (!spec || !Array.isArray(manifest) || !manifest.length || !provider || (provider !== "bedrock" && !key)) {
     return res.status(400).json({ error: "spec, manifest[], provider (and key for BYOK) are required" });
   }
+  // Gate + set the anon cookie BEFORE streaming so a 401/402 returns as JSON.
+  let bill;
+  try { bill = await prepareBilling(req, res, provider); }
+  catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code }); }
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -259,10 +371,10 @@ app.post("/refix", async (req, res) => {
   try {
     const builder = { provider, key, model: builderModel || model };
     const verifier = { provider, key, model: verifierModel || builderModel || model };
-    const { result, balance } = await withBilling(req, provider, "refix", () =>
+    const { result, balance, anonTokensRemaining } = await runBilled(bill, "refix", () =>
       refixFromReview(builder, verifier, spec, manifest, review || "", (ev) => send({ type: "progress", event: ev }))
     );
-    send({ done: true, ...result, balance });
+    send({ done: true, ...result, balance, anonTokensRemaining });
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
@@ -280,7 +392,7 @@ app.post("/flow/start", async (req, res) => {
   }
   try {
     const threadId = crypto.randomUUID();
-    const { result: out, balance } = await withBilling(req, provider, "flow", () =>
+    const { result: out, balance, anonTokensRemaining } = await withBilling(req, res, provider, "flow", () =>
       startFlow(
         {
           prompt: prompt,
@@ -293,9 +405,9 @@ app.post("/flow/start", async (req, res) => {
         threadId
       )
     );
-    res.json({ threadId, ...out, balance });
+    res.json({ threadId, ...out, balance, anonTokensRemaining });
   } catch (e) {
-    res.status(e.status || 500).json({ error: String((e && e.message) || e) });
+    res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code });
   }
 });
 
@@ -333,6 +445,9 @@ app.post("/flow/continue", async (req, res) => {
     return res.status(400).json({ error: "spec, provider (and key for BYOK) are required" });
   }
   const tid = threadId || crypto.randomUUID();
+  let bill;
+  try { bill = await prepareBilling(req, res, provider); }
+  catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code }); }
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
@@ -345,10 +460,10 @@ app.post("/flow/continue", async (req, res) => {
     const verifier = { provider, key, model: verifierModel || builderModel || model };
     const seedFiles = (files || []).filter((f) => f && /\.s?v$/i.test(f.name));
     const control = { seedFiles, shouldStop: () => isStopped(tid) };
-    const { result: out, balance } = await withBilling(req, provider, "flow", () =>
+    const { result: out, balance, anonTokensRemaining } = await runBilled(bill, "flow", () =>
       buildDesign(builder, spec, (ev) => send({ type: "progress", event: ev }), verifier, null, control)
     );
-    send({ threadId: tid, done: true, ...out, balance });
+    send({ threadId: tid, done: true, ...out, balance, anonTokensRemaining });
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
@@ -359,6 +474,10 @@ app.post("/flow/approve", async (req, res) => {
   const { threadId, approved, changes, provider } = req.body || {};
   if (!threadId) return res.status(400).json({ error: "threadId required" });
 
+  // Gate + set the anon cookie BEFORE streaming so a 401/402 returns as JSON.
+  let bill;
+  try { bill = await prepareBilling(req, res, provider || "byok"); }
+  catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e), code: e && e.code }); }
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering if present
@@ -368,16 +487,14 @@ app.post("/flow/approve", async (req, res) => {
 
   try {
     // The Builder (the token-heavy phase) runs here, so meter/charge here too.
-    // The frontend forwards its JWT + provider so Bedrock runs get billed. Out of
-    // credits surfaces as an { error } stream line (headers are already sent).
-    const { result: out, balance } = await withBilling(req, provider || "byok", "flow", () =>
+    const { result: out, balance, anonTokensRemaining } = await runBilled(bill, "flow", () =>
       resumeFlow(
         threadId,
         { approved: !!approved, changes: changes || "" },
         (ev) => send({ type: "progress", event: ev }) // live build events
       )
     );
-    send({ threadId, ...out, balance }); // final line: {done, files, log} or {done:false, spec}
+    send({ threadId, ...out, balance, anonTokensRemaining }); // final: {done, files, log} or {done:false, spec}
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
