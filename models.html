@@ -91,8 +91,8 @@
 
     <div class="note">
       Prices are <b>approximate</b> Amazon Bedrock list prices (US regions) and may change — verify against the
-      AWS Bedrock pricing page. “Blended” = (input + output) ÷ 2, used only to rank. DeepSeek-V3 / V3.2 Bedrock
-      prices are estimates; update the numbers in this file’s <code>MODELS</code> data if they differ.
+      AWS Bedrock pricing page. “Blended” = (input + output) ÷ 2, used only to rank. DeepSeek and Llama 4 / 3.3 prices are the AWS Standard-tier list. Llama 3.1 8B / 70B
+      are best-known estimates (not on the screenshot) — update <code>MODELS</code> if they differ.
     </div>
   </main>
 
@@ -107,8 +107,8 @@
         { name: "Llama 3.1 70B",    id: "us.meta.llama3-1-70b-instruct-v1:0",      in: 0.72, out: 0.72 }
       ],
       deepseek: [
-        { name: "DeepSeek-V3.2", id: "deepseek.v3.2",        in: 0.28, out: 0.42 },
-        { name: "DeepSeek-V3",   id: "deepseek.v3-v1:0",     in: 0.58, out: 1.68 },
+        { name: "DeepSeek-V3.1", id: "deepseek.v3-v1:0",     in: 0.58, out: 1.68 },
+        { name: "DeepSeek-V3.2", id: "deepseek.v3.2",        in: 0.62, out: 1.85 },
         { name: "DeepSeek-R1",   id: "us.deepseek.r1-v1:0",  in: 1.35, out: 5.40 }
       ]
     };
