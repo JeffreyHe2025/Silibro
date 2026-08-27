@@ -193,10 +193,8 @@ const billingRouter = express.Router();
 billingRouter.get("/account", async (req, res) => {
   try {
     const userId = await authUser(req);
-    // Reconcile with this device's anonymous pool (forwarded as X-Anon-Id) so the
-    // signed-in and signed-out balances stay consistent for the same person.
-    const anonId = req.headers["x-anon-id"];
-    const st = anonId ? await syncAnon(userId, anonId) : await getStatus(userId);
+    // Signed-in and anonymous (guest) pools are intentionally SEPARATE.
+    const st = await getStatus(userId);
     res.json({
       tokens_remaining: Number(st.tokens_remaining || 0),
       monthly_token_cap: Number(st.monthly_token_cap || 0),
