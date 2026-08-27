@@ -210,16 +210,23 @@ function normWidth(w) {
 
 // Build the exact module header from the contract (module + params + ports).
 function buildHeader(name, contract) {
-  if (!contract || !contract.ports || !contract.ports.length) return null;
+  if (!contract || !contract.ports) return null;
+  const ID = /^[A-Za-z_]\w*$/; // a valid Verilog identifier
+  // Drop any malformed ports/params (a bad LLM contract can omit a name -> the JS
+  // `undefined` would stringify into "undefined" and produce invalid Verilog).
+  const ports = contract.ports.filter((p) => p && ID.test(String(p.name || "")));
+  if (!ports.length) return null; // nothing usable -> let the Builder write the whole module
   let h = "module " + name;
-  const params = contract.parameters || [];
+  const params = (contract.parameters || []).filter((p) => p && ID.test(String(p.name || "")));
   if (params.length) {
     h += " #(\n" + params.map((p) => {
-      const d = (p.default != null && String(p.default).trim() !== "") ? p.default : "1";
+      let d = (p.default != null && String(p.default).trim() !== "") ? String(p.default).trim() : "1";
+      // default must look like a simple constant expression; otherwise fall back to 1
+      if (!/^[\w'\-+*/()\s.]+$/.test(d) || /undefined|NaN|\[object/i.test(d)) d = "1";
       return "  parameter " + p.name + " = " + d;
     }).join(",\n") + "\n)";
   }
-  h += " (\n" + contract.ports.map((p) => {
+  h += " (\n" + ports.map((p) => {
     const dir = /out/i.test(p.direction) ? "output" : (/inout/i.test(p.direction) ? "inout" : "input");
     const w = normWidth(p.width);
     return "  " + dir + " logic " + (w ? w + " " : "") + p.name;
