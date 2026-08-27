@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Developer — Benchmark Keys</title>
+  <title>Developer — Benchmark Keys & Models</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background: #f5f6f8; color: #1c1e21;
@@ -12,116 +12,174 @@
     .topbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
     .back-link { color: #cbd5e1; text-decoration: none; font-size: 14px; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; padding: 6px 12px; }
     .back-link:hover { background: rgba(255,255,255,0.12); color: #fff; }
-    .wrap { max-width: 640px; margin: 0 auto; padding: 28px 20px 60px; }
+    .wrap { max-width: 680px; margin: 0 auto; padding: 28px 20px 60px; }
     .intro { color: #4b5563; font-size: 15px; line-height: 1.5; margin: 0 0 20px; }
     .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }
-    .row { margin-bottom: 16px; }
-    .row label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 4px; }
-    .row .hint { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
-    .row .status { font-size: 12px; font-weight: 600; margin-left: 8px; }
+    .prov { margin-bottom: 22px; padding-bottom: 18px; border-bottom: 1px solid #eef0f3; }
+    .prov:last-of-type { border-bottom: none; }
+    .prov h3 { margin: 0 0 2px; font-size: 15px; }
+    .prov .status { font-size: 12px; font-weight: 600; margin-left: 8px; }
     .status.set { color: #1a7f37; } .status.unset { color: #9ca3af; }
-    input[type=password], input[type=text] { width: 100%; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-family: ui-monospace, Menlo, monospace; }
-    .btn { background: #1f2937; color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .hint { font-size: 12px; color: #6b7280; margin: 0 0 8px; }
+    input[type=password], input[type=text] { width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-family: ui-monospace, Menlo, monospace; }
+    .models-label { font-size: 12px; font-weight: 600; color: #374151; margin: 12px 0 6px; }
+    .model-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+    .model-row input { flex: 1; }
+    .mini { border: 1px solid #d1d5db; background: #fff; border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .mini:hover { background: #f3f4f6; }
+    .rm { color: #b91c1c; border-color: #f3c0c0; }
+    .chk { font-size: 12px; font-weight: 600; min-width: 90px; }
+    .chk.ok { color: #1a7f37; } .chk.bad { color: #b91c1c; } .chk.na { color: #9ca3af; }
+    .add-model { font-size: 12px; color: #1d4ed8; background: none; border: none; cursor: pointer; padding: 2px 0; }
+    .btn { background: #1f2937; color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px; }
     .btn:hover { background: #374151; } .btn:disabled { opacity: .5; cursor: default; }
-    .msg { margin-top: 14px; font-size: 13px; }
-    .msg.err { color: #b91c1c; } .msg.ok { color: #1a7f37; }
-    .gate { color: #6b7280; font-size: 15px; line-height: 1.5; }
-    .gate a { color: #1d4ed8; }
+    .msg { margin-top: 14px; font-size: 13px; } .msg.err { color: #b91c1c; } .msg.ok { color: #1a7f37; }
+    .gate { color: #6b7280; font-size: 15px; line-height: 1.5; } .gate a { color: #1d4ed8; }
   </style>
 </head>
 <body>
   <header class="topbar">
-    <h1>🔐 Benchmark Keys</h1>
+    <h1>🔐 Benchmark Keys & Models</h1>
     <a class="back-link" href="/">← Back to Verilog Coder</a>
   </header>
   <main class="wrap">
     <p class="intro">
-      Developer-only. Import provider API keys the <b>monthly benchmark</b> uses to run BYOK models
-      (Claude, GPT, Gemini) — in addition to the Bedrock models. Keys are stored on the backend and never shown again.
+      Developer-only. Import provider API keys and choose which models the <b>monthly benchmark</b> tests
+      (in addition to the Bedrock models). Keys are stored on the backend and never shown again. Use
+      <b>Check</b> to confirm a model id still responds (not retired) — save the key first.
     </p>
     <div id="gate" class="gate">Checking access…</div>
-    <div id="panel" class="card" style="display:none;">
-      <div id="fields"></div>
-      <button id="save" class="btn">Save keys</button>
-      <div id="msg" class="msg"></div>
-    </div>
+    <div id="panel" class="card" style="display:none;"></div>
+    <button id="save" class="btn" style="display:none;">Save keys & models</button>
+    <div id="msg" class="msg"></div>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="/config.js"></script>
   <script>
     var BACKEND = "https://verilogprojectcreate.duckdns.org";
-    var FIELDS = [
-      { k: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)", hint: "console.anthropic.com — runs the Claude models" },
-      { k: "OPENAI_API_KEY",    label: "OpenAI (ChatGPT/GPT)", hint: "platform.openai.com — runs the GPT models" },
-      { k: "GOOGLE_API_KEY",    label: "Google (Gemini)", hint: "aistudio.google.com — runs the Gemini models" },
-      { k: "DEEPSEEK_API_KEY",  label: "DeepSeek (optional)", hint: "optional — DeepSeek also runs via Bedrock" },
-      { k: "OPENROUTER_API_KEY",label: "OpenRouter (optional)", hint: "optional — Llama also runs via Bedrock" }
+    // BYOK providers with a model list + availability check.
+    var PROVIDERS = [
+      { p: "anthropic", keyEnv: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)", hint: "console.anthropic.com — Claude models", models: true },
+      { p: "openai",    keyEnv: "OPENAI_API_KEY",    label: "OpenAI (ChatGPT/GPT)", hint: "platform.openai.com — GPT models", models: true },
+      { p: "google",    keyEnv: "GOOGLE_API_KEY",    label: "Google (Gemini)", hint: "aistudio.google.com — Gemini models", models: true },
+      { p: "deepseek",  keyEnv: "DEEPSEEK_API_KEY",  label: "DeepSeek (optional)", hint: "optional — DeepSeek also runs via Bedrock", models: false }
     ];
     var cfg = window.SUPABASE_CONFIG || {};
     var sb = window.supabase.createClient(cfg.url, cfg.anonKey);
+    var modelState = {}; // { anthropic:[ids], openai:[ids], google:[ids] }
 
-    async function jwt() {
-      var r = await sb.auth.getSession();
-      return r && r.data && r.data.session && r.data.session.access_token;
+    async function jwt() { var r = await sb.auth.getSession(); return r && r.data && r.data.session && r.data.session.access_token; }
+    function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+    function authH(tok){ return { "Content-Type": "application/json", Authorization: "Bearer " + tok }; }
+
+    function modelRow(provider, id) {
+      var row = document.createElement("div"); row.className = "model-row"; row.setAttribute("data-p", provider);
+      row.innerHTML =
+        '<input type="text" class="model-id" value="' + esc(id) + '" placeholder="model id" />' +
+        '<button class="mini check">Check</button>' +
+        '<span class="chk na"></span>' +
+        '<button class="mini rm">✕</button>';
+      row.querySelector(".rm").addEventListener("click", function(){ row.remove(); });
+      row.querySelector(".check").addEventListener("click", function(){ checkModel(provider, row); });
+      return row;
     }
-    function esc(s){ return String(s).replace(/[&<>"]/g, function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
 
-    function renderFields(status) {
-      var html = "";
-      FIELDS.forEach(function (f) {
-        var st = (status && status[f.k]) || "unset";
+    function renderPanel(keyStatus) {
+      var panel = document.getElementById("panel");
+      panel.innerHTML = "";
+      PROVIDERS.forEach(function (pv) {
+        var st = (keyStatus && keyStatus[pv.keyEnv]) || "unset";
         var isSet = st !== "unset";
-        html += '<div class="row"><label>' + esc(f.label) +
-          '<span class="status ' + (isSet ? "set" : "unset") + '">' + (isSet ? esc(st) : "not set") + '</span></label>' +
-          '<div class="hint">' + esc(f.hint) + '</div>' +
-          '<input type="password" data-k="' + f.k + '" placeholder="' + (isSet ? "•••• (leave blank to keep, clear text to remove)" : "paste key…") + '" /></div>';
+        var block = document.createElement("div"); block.className = "prov";
+        block.innerHTML =
+          '<h3>' + esc(pv.label) + '<span class="status ' + (isSet ? "set" : "unset") + '">' + (isSet ? esc(st) : "not set") + '</span></h3>' +
+          '<p class="hint">' + esc(pv.hint) + '</p>' +
+          '<input type="password" class="key-input" data-env="' + pv.keyEnv + '" placeholder="' + (isSet ? "•••• (blank = keep, clear = remove)" : "paste key…") + '" />';
+        panel.appendChild(block);
+        if (pv.models) {
+          var lbl = document.createElement("div"); lbl.className = "models-label"; lbl.textContent = "Models tested";
+          block.appendChild(lbl);
+          var list = document.createElement("div"); list.className = "model-list"; list.setAttribute("data-p", pv.p);
+          (modelState[pv.p] || []).forEach(function (id) { list.appendChild(modelRow(pv.p, id)); });
+          block.appendChild(list);
+          var add = document.createElement("button"); add.className = "add-model"; add.textContent = "+ Add model";
+          add.addEventListener("click", function(){ list.appendChild(modelRow(pv.p, "")); });
+          block.appendChild(add);
+        }
       });
-      document.getElementById("fields").innerHTML = html;
     }
 
-    async function init() {
-      var tok = await jwt();
-      var gate = document.getElementById("gate");
-      if (!tok) {
-        gate.innerHTML = 'Sign in on the <a href="/">main app</a> first (with the developer account), then reload this page.';
-        return;
-      }
+    async function checkModel(provider, row) {
+      var id = row.querySelector(".model-id").value.trim();
+      var chk = row.querySelector(".chk");
+      if (!id) { chk.className = "chk na"; chk.textContent = "enter id"; return; }
+      chk.className = "chk na"; chk.textContent = "checking…";
       try {
-        var r = await fetch(BACKEND + "/admin/keys/status", { headers: { Authorization: "Bearer " + tok } });
-        if (r.status === 403) { gate.textContent = "This account isn't authorized for the developer key page."; return; }
-        if (!r.ok) { var e = await r.json().catch(function(){return{};}); gate.textContent = "Error: " + (e.error || r.status); return; }
+        var tok = await jwt();
+        var r = await fetch(BACKEND + "/admin/check-model", { method: "POST", headers: authH(tok), body: JSON.stringify({ provider: provider, model: id }) });
         var d = await r.json();
-        gate.style.display = "none";
-        document.getElementById("panel").style.display = "block";
-        renderFields(d.status);
-      } catch (e) { gate.textContent = "Couldn't reach the backend: " + (e.message || e); }
+        if (d.available === true) { chk.className = "chk ok"; chk.textContent = "✓ available"; }
+        else if (d.available === false) { chk.className = "chk bad"; chk.textContent = "✗ " + (d.detail || "unavailable"); chk.title = d.detail || ""; }
+        else { chk.className = "chk na"; chk.textContent = d.detail || "n/a"; }
+      } catch (e) { chk.className = "chk bad"; chk.textContent = "check failed"; }
+    }
+
+    function gatherModels() {
+      var out = {};
+      document.querySelectorAll(".model-list").forEach(function (list) {
+        var p = list.getAttribute("data-p");
+        out[p] = Array.prototype.map.call(list.querySelectorAll(".model-id"), function (i) { return i.value.trim(); }).filter(Boolean);
+      });
+      return out;
+    }
+    function gatherKeys() {
+      var out = {};
+      document.querySelectorAll(".key-input").forEach(function (i) { if (i.value !== "") out[i.getAttribute("data-env")] = i.value.trim(); });
+      return out;
     }
 
     document.getElementById("save").addEventListener("click", async function () {
-      var btn = this, msg = document.getElementById("msg");
-      msg.className = "msg"; msg.textContent = "";
-      var payload = {};
-      document.querySelectorAll("#fields input").forEach(function (inp) {
-        var v = inp.value; // only send fields the user typed into (blank = keep existing)
-        if (v !== "") payload[inp.getAttribute("data-k")] = v.trim();
-      });
-      if (!Object.keys(payload).length) { msg.className = "msg err"; msg.textContent = "Nothing to save — type a key (or clear one to remove it)."; return; }
+      var btn = this, msg = document.getElementById("msg"); msg.className = "msg"; msg.textContent = "";
       btn.disabled = true; btn.textContent = "Saving…";
       try {
         var tok = await jwt();
-        var r = await fetch(BACKEND + "/admin/keys", {
-          method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + tok },
-          body: JSON.stringify(payload)
-        });
-        var d = await r.json();
-        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
-        renderFields(d.status);
-        msg.className = "msg ok"; msg.textContent = "Saved. The monthly benchmark will use these keys.";
+        var keys = gatherKeys();
+        if (Object.keys(keys).length) {
+          var rk = await fetch(BACKEND + "/admin/keys", { method: "POST", headers: authH(tok), body: JSON.stringify(keys) });
+          if (!rk.ok) throw new Error((await rk.json().catch(function(){return{};})).error || "key save failed");
+        }
+        var rm = await fetch(BACKEND + "/admin/models", { method: "POST", headers: authH(tok), body: JSON.stringify({ models: gatherModels() }) });
+        var dm = await rm.json();
+        if (!rm.ok) throw new Error(dm.error || "model save failed");
+        modelState = dm.models || modelState;
+        // refresh key status masks
+        var rs = await fetch(BACKEND + "/admin/keys/status", { headers: { Authorization: "Bearer " + tok } });
+        var ds = await rs.json();
+        renderPanel(ds.status);
+        msg.className = "msg ok"; msg.textContent = "Saved. The monthly benchmark will use these keys and models.";
       } catch (e) { msg.className = "msg err"; msg.textContent = "Save failed: " + (e.message || e); }
-      finally { btn.disabled = false; btn.textContent = "Save keys"; }
+      finally { btn.disabled = false; btn.textContent = "Save keys & models"; }
     });
 
+    async function init() {
+      var gate = document.getElementById("gate");
+      var tok = await jwt();
+      if (!tok) { gate.innerHTML = 'Sign in on the <a href="/">main app</a> first (developer account), then reload.'; return; }
+      try {
+        var rs = await fetch(BACKEND + "/admin/keys/status", { headers: { Authorization: "Bearer " + tok } });
+        if (rs.status === 403) { gate.textContent = "This account isn't authorized for the developer page."; return; }
+        if (!rs.ok) { gate.textContent = "Error: " + ((await rs.json().catch(function(){return{};})).error || rs.status); return; }
+        var ds = await rs.json();
+        var rm = await fetch(BACKEND + "/admin/models", { headers: { Authorization: "Bearer " + tok } });
+        var dm = await rm.json();
+        modelState = (dm && dm.models) || {};
+        gate.style.display = "none";
+        document.getElementById("panel").style.display = "block";
+        document.getElementById("save").style.display = "inline-block";
+        renderPanel(ds.status);
+      } catch (e) { gate.textContent = "Couldn't reach the backend: " + (e.message || e); }
+    }
     init();
   </script>
 </body>

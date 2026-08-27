@@ -200,7 +200,7 @@ app.get("/leaderboard/results", (_req, res) => {
 // emails); the harness reads them (token-auth) and runs those models monthly in
 // addition to Bedrock. Stored server-side only, never returned to a browser.
 const DEV_KEYS_FILE = path.join(__dirname, "dev-keys.json");
-const DEV_KEY_NAMES = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"];
+const DEV_KEY_NAMES = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"];
 function readDevKeys() { try { return JSON.parse(fs.readFileSync(DEV_KEYS_FILE, "utf8")); } catch (e) { return {}; } }
 function writeDevKeys(o) { fs.writeFileSync(DEV_KEYS_FILE, JSON.stringify(o)); }
 function maskKeys(store) {
@@ -231,6 +231,63 @@ app.get("/admin/keys/status", async (req, res) => {
 app.get("/admin/keys", (req, res) => {
   if (!leaderboardAuthed(req)) return res.status(401).json({ error: "unauthorized" });
   res.json(readDevKeys());
+});
+
+// ---- Which BYOK models the benchmark tests (managed on /admin) ---------------
+const BENCH_MODELS_FILE = path.join(__dirname, "benchmark-models.json");
+const BENCH_PROVIDERS = ["anthropic", "openai", "google"]; // BYOK providers with model lists
+const BENCH_DEFAULTS = {
+  anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+  openai: ["gpt-5", "gpt-5-mini"],
+  google: ["gemini-3.1-pro-preview", "gemini-3.1-flash-lite"],
+};
+function readBenchModels() {
+  let stored = {};
+  try { stored = JSON.parse(fs.readFileSync(BENCH_MODELS_FILE, "utf8")); } catch (e) { stored = {}; }
+  const out = {};
+  BENCH_PROVIDERS.forEach(function (p) {
+    out[p] = Array.isArray(stored[p]) ? stored[p] : BENCH_DEFAULTS[p].slice();
+  });
+  return out;
+}
+function writeBenchModels(o) { fs.writeFileSync(BENCH_MODELS_FILE, JSON.stringify(o)); }
+
+// Read the model lists — admin (browser) OR the harness (token).
+app.get("/admin/models", async (req, res) => {
+  const okToken = leaderboardAuthed(req);
+  if (!okToken) { try { await authAdmin(req); } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); } }
+  res.json({ providers: BENCH_PROVIDERS, models: readBenchModels() });
+});
+// Save the model lists (admin only).
+app.post("/admin/models", async (req, res) => {
+  try { await authAdmin(req); } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); }
+  const body = (req.body && req.body.models) || {};
+  const store = readBenchModels();
+  BENCH_PROVIDERS.forEach(function (p) {
+    if (Array.isArray(body[p])) {
+      store[p] = body[p].map(function (x) { return String(x || "").trim(); }).filter(Boolean).slice(0, 40);
+    }
+  });
+  try { writeBenchModels(store); } catch (e) { return res.status(500).json({ error: String((e && e.message) || e) }); }
+  res.json({ ok: true, models: store });
+});
+// Quick availability check: does this model still respond with the stored key?
+app.post("/admin/check-model", async (req, res) => {
+  try { await authAdmin(req); } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); }
+  const provider = String((req.body && req.body.provider) || "");
+  const model = String((req.body && req.body.model) || "").trim();
+  if (BENCH_PROVIDERS.indexOf(provider) < 0 || !model) return res.status(400).json({ error: "provider and model required" });
+  const envMap = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", google: "GOOGLE_API_KEY" };
+  const key = readDevKeys()[envMap[provider]];
+  if (!key) return res.json({ available: null, detail: "set the " + provider + " key first to check" });
+  try {
+    await callLLM({ provider: provider, key: key, model: model, messages: [{ role: "user", content: "hi" }] });
+    res.json({ available: true, detail: "responded OK" });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    const retired = /not found|does not exist|end of life|decommission|deprecat|invalid model|unknown model|model_not_found|no such model/i.test(msg);
+    res.json({ available: false, detail: retired ? "unavailable / retired" : msg.slice(0, 180) });
+  }
 });
 
 // Compile-check arbitrary files (used by the frontend's loop / testbenches).
