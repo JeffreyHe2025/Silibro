@@ -49,6 +49,14 @@
       <b>Check</b> to confirm a model id still responds (not retired) — save the key first.
     </p>
     <div id="gate" class="gate">Checking access…</div>
+    <div id="run-card" class="card" style="display:none; margin-bottom:16px;">
+      <h3 style="margin:0 0 4px; font-size:15px;">Run size</h3>
+      <p class="hint">How the monthly benchmark samples the Pluto problems (applies to every model).</p>
+      <div style="display:flex; gap:22px; margin-top:6px;">
+        <label style="font-size:13px; font-weight:600;">Problems per run<br><input id="pp" type="number" min="1" max="43" style="width:100px; margin-top:4px;" /></label>
+        <label style="font-size:13px; font-weight:600;">Attempts per problem<br><input id="ap" type="number" min="1" max="20" style="width:100px; margin-top:4px;" /></label>
+      </div>
+    </div>
     <div id="panel" class="card" style="display:none;"></div>
     <button id="save" class="btn" style="display:none;">Save keys & models</button>
     <div id="msg" class="msg"></div>
@@ -60,10 +68,11 @@
     var BACKEND = "https://verilogprojectcreate.duckdns.org";
     // BYOK providers with a model list + availability check.
     var PROVIDERS = [
-      { p: "anthropic", keyEnv: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)", hint: "console.anthropic.com — Claude models", models: true },
-      { p: "openai",    keyEnv: "OPENAI_API_KEY",    label: "OpenAI (ChatGPT/GPT)", hint: "platform.openai.com — GPT models", models: true },
-      { p: "google",    keyEnv: "GOOGLE_API_KEY",    label: "Google (Gemini)", hint: "aistudio.google.com — Gemini models", models: true },
-      { p: "deepseek",  keyEnv: "DEEPSEEK_API_KEY",  label: "DeepSeek (optional)", hint: "optional — DeepSeek also runs via Bedrock", models: false }
+      { p: "anthropic", keyEnv: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)", hint: "console.anthropic.com — Claude models", key: true, models: true },
+      { p: "openai",    keyEnv: "OPENAI_API_KEY",    label: "OpenAI (ChatGPT/GPT)", hint: "platform.openai.com — GPT models", key: true, models: true },
+      { p: "google",    keyEnv: "GOOGLE_API_KEY",    label: "Google (Gemini)", hint: "aistudio.google.com — Gemini models", key: true, models: true },
+      { p: "deepseek",  label: "DeepSeek (Bedrock)", hint: "runs on your AWS Bedrock — no key. Selects which DeepSeek models run.", key: false, models: true },
+      { p: "llama",     label: "Llama (Bedrock)", hint: "runs on your AWS Bedrock — no key. Selects which Llama models run.", key: false, models: true }
     ];
     var cfg = window.SUPABASE_CONFIG || {};
     var sb = window.supabase.createClient(cfg.url, cfg.anonKey);
@@ -92,10 +101,11 @@
         var st = (keyStatus && keyStatus[pv.keyEnv]) || "unset";
         var isSet = st !== "unset";
         var block = document.createElement("div"); block.className = "prov";
-        block.innerHTML =
-          '<h3>' + esc(pv.label) + '<span class="status ' + (isSet ? "set" : "unset") + '">' + (isSet ? esc(st) : "not set") + '</span></h3>' +
-          '<p class="hint">' + esc(pv.hint) + '</p>' +
-          '<input type="password" class="key-input" data-env="' + pv.keyEnv + '" placeholder="' + (isSet ? "•••• (blank = keep, clear = remove)" : "paste key…") + '" />';
+        var html = '<h3>' + esc(pv.label);
+        if (pv.key) html += '<span class="status ' + (isSet ? "set" : "unset") + '">' + (isSet ? esc(st) : "not set") + '</span>';
+        html += '</h3><p class="hint">' + esc(pv.hint) + '</p>';
+        if (pv.key) html += '<input type="password" class="key-input" data-env="' + pv.keyEnv + '" placeholder="' + (isSet ? "•••• (blank = keep, clear = remove)" : "paste key…") + '" />';
+        block.innerHTML = html;
         panel.appendChild(block);
         if (pv.models) {
           var lbl = document.createElement("div"); lbl.className = "models-label"; lbl.textContent = "Models tested";
@@ -153,6 +163,11 @@
         var dm = await rm.json();
         if (!rm.ok) throw new Error(dm.error || "model save failed");
         modelState = dm.models || modelState;
+        var rr = await fetch(BACKEND + "/admin/run-settings", { method: "POST", headers: authH(tok),
+          body: JSON.stringify({ problemsPerRun: document.getElementById("pp").value, attemptsPerProblem: document.getElementById("ap").value }) });
+        var dr = await rr.json();
+        if (!rr.ok) throw new Error(dr.error || "run-settings save failed");
+        document.getElementById("pp").value = dr.problemsPerRun; document.getElementById("ap").value = dr.attemptsPerProblem;
         // refresh key status masks
         var rs = await fetch(BACKEND + "/admin/keys/status", { headers: { Authorization: "Bearer " + tok } });
         var ds = await rs.json();
@@ -174,7 +189,12 @@
         var rm = await fetch(BACKEND + "/admin/models", { headers: { Authorization: "Bearer " + tok } });
         var dm = await rm.json();
         modelState = (dm && dm.models) || {};
+        var rr = await fetch(BACKEND + "/admin/run-settings", { headers: { Authorization: "Bearer " + tok } });
+        var dr = await rr.json();
+        document.getElementById("pp").value = dr.problemsPerRun || 3;
+        document.getElementById("ap").value = dr.attemptsPerProblem || 3;
         gate.style.display = "none";
+        document.getElementById("run-card").style.display = "block";
         document.getElementById("panel").style.display = "block";
         document.getElementById("save").style.display = "inline-block";
         renderPanel(ds.status);
