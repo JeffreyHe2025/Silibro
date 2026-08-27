@@ -9,7 +9,13 @@ command -v vvp >/dev/null || { echo "❌ vvp missing (comes with iverilog)"; exi
 echo "✅ node $(node -v), iverilog present"
 
 if [ ! -f .env ]; then
-  cp .env.example .env
+  cat > .env <<'ENV'
+# Same token as the backend's HARNESS_ADMIN_TOKEN (required).
+HARNESS_ADMIN_TOKEN=
+# Optional overrides (config.json already has sensible defaults):
+# PLUTO_REPO=/home/ubuntu/pluto
+# HARNESS_BACKEND_URL=https://verilogprojectcreate.duckdns.org
+ENV
   echo "📝 Created harness/.env — set HARNESS_ADMIN_TOKEN (same value as the backend's) then re-run this script."
   exit 0
 fi
