@@ -1711,6 +1711,10 @@
     
     var attachedNames = specFiles.map(function (s) { return s.name; });
     var displayUserMsg = promptText + (attachedNames.length ? "\n\n📎 " + attachedNames.join(", ") : "");
+    // Keep the running context bounded: if the chat has grown very long, summarize
+    // the earlier turns and continue in a fresh session (context preserved, not lost).
+    try { await maybeSummarizeContext(provider, key, model); } catch (e) {}
+
     appendChatMsg("user", displayUserMsg, imgs);
     chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
     try { await saveConversation(); } catch (e) {}
@@ -2795,7 +2799,7 @@
     else sessionStorage.removeItem("llm_active_connection_id");
   }
 
-  function currentProvider() { return localStorage.getItem("llm_provider") || "openrouter"; }
+  function currentProvider() { return localStorage.getItem("llm_provider") || "bedrock"; }
   
   function getProviderKey(p) {
     // Bedrock has no BYOK key. Return a non-secret sentinel so the existing
@@ -2841,7 +2845,7 @@
     
     // Check old single key
     var oldKey = localStorage.getItem("llm_api_key");
-    var p = localStorage.getItem("llm_provider") || "openrouter";
+    var p = localStorage.getItem("llm_provider") || "bedrock";
     if (oldKey) {
       localStorage.setItem("llm_key_" + p, oldKey);
       localStorage.removeItem("llm_api_key");
@@ -2986,7 +2990,7 @@
   }
 
   function showKeySetup() {
-    chatProvider.value = localStorage.getItem("llm_provider") || "openrouter";
+    chatProvider.value = localStorage.getItem("llm_provider") || "bedrock";
     updateProviderUI();
     chatWelcome.classList.add("hidden");
     chatKeySetup.classList.remove("hidden");
@@ -3139,6 +3143,42 @@
     localStorage.removeItem("last_conversation_id");
     chatConversation.innerHTML = "";
     showConversation();
+  }
+
+  // Rough token estimate = chars / 4. When the conversation exceeds the limit,
+  // summarize the whole transcript and START A NEW SESSION seeded with that
+  // summary — so the model keeps the thread without an ever-growing (costly or
+  // overflowing) history. Signed-in users' prior chat stays saved in History.
+  var CONTEXT_CHAR_LIMIT = 32000; // ~8k tokens
+  async function maybeSummarizeContext(provider, key, model) {
+    var total = 0;
+    chatHistory.forEach(function (m) { total += (m && m.content ? String(m.content).length : 0); });
+    if (total < CONTEXT_CHAR_LIMIT || chatHistory.length < 4) return;
+
+    var transcript = chatHistory.map(function (m) {
+      return (m.role === "user" ? "User: " : "Assistant: ") + (m.content || "");
+    }).join("\n");
+    var sys = "You are compacting a Verilog/hardware design chat so it can continue in a new session. " +
+      "Summarize the conversation concisely but PRESERVE all: module names, ports, bit-widths, clock/reset " +
+      "style, design decisions, constraints, file names, and any open questions or next steps. Output only the summary.";
+    var summary;
+    try { summary = await callLLM(provider, key, model, sys, [{ role: "user", content: transcript }]); }
+    catch (e) { return; } // if summarization fails, just continue with the full history
+    if (!summary) return;
+
+    // Persist the current (long) session before starting the new one.
+    try { await saveConversation(); } catch (e) {}
+
+    // Fresh session seeded with the summary (kept as context for later turns).
+    chatHistory = [{ role: "assistant", content: "📝 Context summary (carried over from a longer chat):\n\n" + summary }];
+    currentConversationId = null;
+    localStorage.removeItem("last_conversation_id");
+    chatConversation.innerHTML = "";
+    renderConversation();
+    appendChatMsg("assistant", isSignedIn()
+      ? "🧵 This chat got long, so I summarized it and started a fresh session to keep context tight. Your previous chat is saved in History."
+      : "🧵 This chat got long, so I summarized the earlier messages to keep context tight.");
+    try { await saveConversation(); } catch (e) {}
   }
 
   async function saveConversation() {
