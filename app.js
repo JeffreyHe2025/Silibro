@@ -3001,8 +3001,10 @@
   }
 
   function setConnectedButtons(show) {
-    chatNew.classList.toggle("hidden", !show);
-    chatHistoryBtn.classList.toggle("hidden", !show);
+    // History + New stay available even with no key so you can view past chats
+    // (and start a fresh one) — you just can't SEND until a key is connected.
+    chatNew.classList.remove("hidden");
+    chatHistoryBtn.classList.remove("hidden");
   }
 
   function showKeySetup() {
