@@ -1802,6 +1802,7 @@
     }
 
     bubble.textContent = "🧭 Verifier is writing the spec…";
+    var buildPrompt = buildContextPreamble() + fullPrompt; // context-aware follow-ups
     try {
       var resp;
       var retries = 0;
@@ -1811,7 +1812,7 @@
             method: "POST",
             credentials: "include",
             headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
-            body: JSON.stringify({ prompt: fullPrompt, provider: provider, key: key, builderModel: model }),
+            body: JSON.stringify({ prompt: buildPrompt, provider: provider, key: key, builderModel: model }),
           });
           break; // successfully connected!
         } catch (e) {
@@ -3179,6 +3180,28 @@
       ? "🧵 This chat got long, so I summarized it and started a fresh session to keep context tight. Your previous chat is saved in History."
       : "🧵 This chat got long, so I summarized the earlier messages to keep context tight.");
     try { await saveConversation(); } catch (e) {}
+  }
+
+  // Build a compact context preamble for the AGENTIC BUILD flow so follow-up
+  // requests ("add a reset to that", "make it 16-bit") are context-aware. Uses the
+  // carried-over summary (if any) + recent user requests. Excludes the current
+  // message (still the last item in chatHistory) and system notices. Bounded.
+  function buildContextPreamble() {
+    var prior = chatHistory.slice(0, -1); // everything before the current request
+    if (!prior.length) return "";
+    var parts = [];
+    prior.forEach(function (m) {
+      if (m.content && /^📝 Context summary/.test(m.content)) parts.push(m.content);
+    });
+    var users = prior.filter(function (m) {
+      return m.role === "user" && m.content && !/^📝/.test(m.content);
+    });
+    users.slice(-5).forEach(function (m) { parts.push("Earlier request: " + m.content); });
+    var ctx = parts.join("\n\n").trim();
+    if (!ctx) return "";
+    if (ctx.length > 6000) ctx = ctx.slice(-6000);
+    return "=== Conversation context (reference only; the current project files reflect this) ===\n" +
+           ctx + "\n\n=== Current request ===\n";
   }
 
   async function saveConversation() {
