@@ -11,6 +11,8 @@
 try { require("dotenv").config({ path: require("path").join(__dirname, ".env") }); } catch (e) { /* dotenv optional */ }
 
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const { buildDesign, refixFromReview, generateProjectTestbench, repairProjectTestbench } = require("./build");
@@ -164,6 +166,34 @@ try {
 app.get("/version", (_req, res) => res.json({ commit: RUNNING_COMMIT }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// ---- Monthly leaderboard results (written by the Pluto harness) --------------
+// The harness POSTs its aggregated results here (authed with the harness token or
+// a Bearer LEADERBOARD_POST_TOKEN); the public /leaderboard page GETs them.
+const LEADERBOARD_FILE = path.join(__dirname, "leaderboard-results.json");
+function leaderboardAuthed(req) {
+  const ht = process.env.HARNESS_ADMIN_TOKEN;
+  if (ht && safeEqual(req.headers["x-harness-token"], ht)) return true;
+  const lt = process.env.LEADERBOARD_POST_TOKEN;
+  const bearer = String(req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
+  if (lt && safeEqual(bearer, lt)) return true;
+  return false;
+}
+app.post("/leaderboard/results", (req, res) => {
+  if (!leaderboardAuthed(req)) return res.status(401).json({ error: "unauthorized" });
+  const data = req.body;
+  if (!data || typeof data !== "object" || !Array.isArray(data.models)) {
+    return res.status(400).json({ error: "expected a results object with a models[] array" });
+  }
+  try { fs.writeFileSync(LEADERBOARD_FILE, JSON.stringify(data)); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: String((e && e.message) || e) }); }
+});
+app.get("/leaderboard/results", (_req, res) => {
+  try {
+    if (!fs.existsSync(LEADERBOARD_FILE)) return res.json({ models: [], empty: true });
+    res.type("application/json").send(fs.readFileSync(LEADERBOARD_FILE, "utf8"));
+  } catch (e) { res.status(500).json({ error: String((e && e.message) || e) }); }
+});
 
 // Compile-check arbitrary files (used by the frontend's loop / testbenches).
 app.post("/compile", async (req, res) => {
