@@ -2593,6 +2593,7 @@
     try {
       var headers = await authHeaders();
       if (!headers.Authorization) return;
+      headers["X-Anon-Id"] = getAnonId(); // reconcile signed-in pool with this device's guest pool
       var r = await fetch(getBackendUrl() + "/billing/account", { headers: headers });
       var d = await r.json();
       if (r.ok) renderCreditsBadgeSiteAware(d);

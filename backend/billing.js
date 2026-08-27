@@ -117,6 +117,18 @@ async function getBalance(userId) {
   return Number(st.tokens_remaining || 0);
 }
 
+// Reconcile a signed-in user's pool with their device's anonymous pool: both are
+// set to the higher spent-so-far, so switching sign-in state can't refill or lose
+// free credit. Returns the (reconciled) account status. Falls back to plain status
+// if the anon id is missing/invalid or the RPC isn't present.
+const ANON_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function syncAnon(userId, anonId) {
+  if (!ANON_UUID_RE.test(String(anonId || ""))) return await getStatus(userId);
+  const { data, error } = await admin.rpc("sync_anon", { p_user: userId, p_anon: anonId });
+  if (error || !data) return await getStatus(userId);
+  return data;
+}
+
 // Gate a call BEFORE running it: allowed if free allowance remains OR the user
 // has prepaid credits. The exact cost isn't known until the tokens come back.
 async function assertCredits(userId) {
@@ -181,7 +193,10 @@ const billingRouter = express.Router();
 billingRouter.get("/account", async (req, res) => {
   try {
     const userId = await authUser(req);
-    const st = await getStatus(userId);
+    // Reconcile with this device's anonymous pool (forwarded as X-Anon-Id) so the
+    // signed-in and signed-out balances stay consistent for the same person.
+    const anonId = req.headers["x-anon-id"];
+    const st = anonId ? await syncAnon(userId, anonId) : await getStatus(userId);
     res.json({
       tokens_remaining: Number(st.tokens_remaining || 0),
       monthly_token_cap: Number(st.monthly_token_cap || 0),
