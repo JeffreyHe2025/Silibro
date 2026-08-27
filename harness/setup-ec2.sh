@@ -31,7 +31,8 @@ fi
 
 HDIR="$(pwd)"
 LINE="0 4 1 * * $HDIR/run-monthly.sh >> $HDIR/run.log 2>&1"   # 04:00 on the 1st
-( crontab -l 2>/dev/null | grep -v 'run-monthly.sh' ; echo "$LINE" ) | crontab -
+# Robust even with no existing crontab (crontab -l / grep can exit non-zero).
+( crontab -l 2>/dev/null | grep -v 'run-monthly.sh' || true ; echo "$LINE" ) | crontab -
 echo "== installed monthly cron =="
-crontab -l | grep run-monthly.sh
+crontab -l | grep run-monthly.sh || echo "  (verify with: crontab -l)"
 echo "✅ Setup complete. Test a run now with:  ./run-monthly.sh"
