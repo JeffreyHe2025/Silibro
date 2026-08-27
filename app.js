@@ -542,12 +542,14 @@
       if (addCreditsBtn) addCreditsBtn.classList.remove("hidden"); // Bedrock credits
       refreshCredits();
       handleTopupReturn();
+      checkAdmin();
     } else {
       userEmail.textContent = "";
       userEmail.classList.add("hidden");
       signOutBtn.classList.add("hidden");
       signInBtn.classList.remove("hidden");
       if (addCreditsBtn) addCreditsBtn.classList.add("hidden");
+      var al = document.getElementById("admin-link"); if (al) al.classList.add("hidden");
       refreshCredits(); // guests: show the per-device free-token badge
     }
     // Reset selection when switching between accounts / guest.
@@ -2573,6 +2575,19 @@
     if (v == null) { renderCreditsBadge(null); return; }
     refreshCredits();
   }
+  // Reveal the topbar Admin link only if the signed-in account is an admin
+  // (the backend returns 200 from /admin/keys/status for allowed emails).
+  async function checkAdmin() {
+    var link = document.getElementById("admin-link");
+    if (!link) return;
+    try {
+      var headers = await authHeaders();
+      if (!headers.Authorization) { link.classList.add("hidden"); return; }
+      var r = await fetch(getBackendUrl() + "/admin/keys/status", { headers: headers });
+      link.classList.toggle("hidden", !r.ok);
+    } catch (e) { link.classList.add("hidden"); }
+  }
+
   async function refreshCredits() {
     if (!isSignedIn()) { return refreshGuestCredits(); }
     try {
