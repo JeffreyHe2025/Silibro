@@ -53,6 +53,21 @@
       margin-top: 18px; font-size: 12px; color: #92400e; background: #fff8ec;
       border: 1px solid #f6c177; border-radius: 8px; padding: 10px 12px;
     }
+
+    h2.section-title { font-size: 17px; margin: 34px 0 4px; color: #111827; }
+    .section-sub { color: #6b7280; font-size: 13px; margin: 0 0 12px; }
+    .podium { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 6px; }
+    .podium-card { flex: 1 1 200px; background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px 18px; position: relative; }
+    .podium-card.gold   { border-color: #f6c34b; box-shadow: 0 2px 10px rgba(246,195,75,.18); }
+    .podium-card.silver { border-color: #cbd5e1; }
+    .podium-card.bronze { border-color: #e0a878; }
+    .podium-medal { font-size: 22px; }
+    .podium-name { font-weight: 700; font-size: 16px; margin: 6px 0 2px; }
+    .podium-stats { display: flex; gap: 18px; margin-top: 10px; }
+    .podium-stat .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .podium-stat .l { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .03em; }
+    .two-boards { display: flex; gap: 22px; flex-wrap: wrap; }
+    .two-boards > div { flex: 1 1 340px; }
   </style>
 </head>
 <body>
@@ -74,18 +89,22 @@
 
     <p id="status" class="intro" style="color:#6b7280;font-size:13px;">Loading results…</p>
 
-    <table class="board">
-      <thead>
-        <tr>
-          <th class="rank">#</th>
-          <th>Model</th>
-          <th>Provider</th>
-          <th class="metric-h">Accuracy</th>
-          <th class="metric-h">Speed</th>
-        </tr>
-      </thead>
-      <tbody id="board-body"></tbody>
-    </table>
+    <h2 class="section-title">🥇 Top 3 Overall</h2>
+    <p class="section-sub">Best balance of accuracy and speed (accuracy weighted 60%, speed 40%).</p>
+    <div id="podium" class="podium"></div>
+
+    <div class="two-boards">
+      <div>
+        <h2 class="section-title">🎯 By Accuracy</h2>
+        <p class="section-sub">Highest pass rate first.</p>
+        <table class="board"><thead><tr><th class="rank">#</th><th>Model</th><th class="metric-h">Accuracy</th></tr></thead><tbody id="acc-body"></tbody></table>
+      </div>
+      <div>
+        <h2 class="section-title">⚡ By Speed</h2>
+        <p class="section-sub">Fastest pipeline time first.</p>
+        <table class="board"><thead><tr><th class="rank">#</th><th>Model</th><th class="metric-h">Speed</th></tr></thead><tbody id="spd-body"></tbody></table>
+      </div>
+    </div>
 
     <p class="note" id="method-note">
       Results are produced by the monthly Pluto harness and are read live from the backend. A dash (—) means a
@@ -109,41 +128,77 @@
       if (ms == null) return "—";
       return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
     }
-    function rankSort(a, b) {
-      var aa = a.accuracyPct, ba = b.accuracyPct;
-      if (aa == null && ba == null) return 0;
-      if (aa == null) return 1;        // untested to the bottom
-      if (ba == null) return -1;
-      if (ba !== aa) return ba - aa;    // higher accuracy first
-      return (a.avgLatencyMs || 1e12) - (b.avgLatencyMs || 1e12); // faster first
+    function tested(models) { return models.filter(function (m) { return m.accuracyPct != null && m.avgLatencyMs != null; }); }
+
+    // Overall balance score: accuracy (norm 0..1) weighted 60%, speed (fastest/this) 40%.
+    function withOverall(models) {
+      var t = tested(models);
+      if (!t.length) return [];
+      var fastest = Math.min.apply(null, t.map(function (m) { return m.avgLatencyMs; }));
+      return t.map(function (m) {
+        var accN = (m.accuracyPct || 0) / 100;
+        var spdN = fastest / m.avgLatencyMs; // 1 = fastest
+        return Object.assign({}, m, { overall: 0.6 * accN + 0.4 * spdN });
+      }).sort(function (a, b) { return b.overall - a.overall; });
     }
-    function render(data) {
-      var status = document.getElementById("status");
-      var body = document.getElementById("board-body");
-      body.innerHTML = "";
-      var models = (data && data.models) || [];
-      if (!models.length) {
-        status.textContent = "No results yet — the monthly benchmark hasn't run.";
-        return;
-      }
-      var when = data.generatedAt ? new Date(data.generatedAt).toLocaleDateString(undefined, { year:"numeric", month:"long", day:"numeric" }) : "";
-      var runs = models[0] && models[0].problemsTested && models[0].attemptsPerProblem
-        ? (models[0].problemsTested + " problems × " + models[0].attemptsPerProblem + " attempts") : "";
-      status.textContent = (data.month ? data.month + " · " : "") + (runs ? runs + " · " : "") + (when ? "updated " + when : "");
-      models.slice().sort(rankSort).forEach(function (m, i) {
+
+    function renderPodium(models) {
+      var el = document.getElementById("podium");
+      var top = withOverall(models).slice(0, 3);
+      if (!top.length) { el.innerHTML = '<p class="section-sub">Not enough tested models yet.</p>'; return; }
+      var medals = ["🥇", "🥈", "🥉"], klass = ["gold", "silver", "bronze"];
+      el.innerHTML = top.map(function (m, i) {
         var prov = providerOf(m.name);
-        var acc = m.accuracyPct == null ? "—" : m.accuracyPct + "%";
-        var rankCell = m.accuracyPct == null ? "—" : (i + 1);
+        return '<div class="podium-card ' + klass[i] + '">' +
+          '<div class="podium-medal">' + medals[i] + '</div>' +
+          '<div class="podium-name">' + (m.name || "") + '</div>' +
+          (prov[0] ? '<span class="prov-badge ' + prov[1] + '">' + prov[0] + '</span>' : '') +
+          '<div class="podium-stats">' +
+            '<div class="podium-stat"><div class="v">' + m.accuracyPct + '%</div><div class="l">Accuracy</div></div>' +
+            '<div class="podium-stat"><div class="v">' + fmtSpeed(m.avgLatencyMs) + '</div><div class="l">Speed</div></div>' +
+          '</div></div>';
+      }).join("");
+    }
+
+    function renderBoard(models, bodyId, metric) {
+      var body = document.getElementById(bodyId);
+      body.innerHTML = "";
+      var rows = models.slice().filter(function (m) {
+        return metric === "acc" ? true : m.avgLatencyMs != null; // speed board: only timed models
+      }).sort(function (a, b) {
+        if (metric === "acc") {
+          if (a.accuracyPct == null && b.accuracyPct == null) return 0;
+          if (a.accuracyPct == null) return 1;
+          if (b.accuracyPct == null) return -1;
+          return b.accuracyPct - a.accuracyPct;
+        }
+        return (a.avgLatencyMs || 1e12) - (b.avgLatencyMs || 1e12); // fastest first
+      });
+      rows.forEach(function (m, i) {
+        var prov = providerOf(m.name);
+        var val = metric === "acc" ? (m.accuracyPct == null ? "—" : m.accuracyPct + "%") : fmtSpeed(m.avgLatencyMs);
+        var rank = (metric === "acc" && m.accuracyPct == null) ? "—" : (i + 1);
         var tr = document.createElement("tr");
-        tr.innerHTML =
-          '<td class="rank">' + rankCell + '</td>' +
-          '<td class="model">' + (m.name || "") + '</td>' +
-          '<td>' + (prov[0] ? '<span class="prov-badge ' + prov[1] + '">' + prov[0] + '</span>' : '') + '</td>' +
-          '<td class="metric">' + acc + '</td>' +
-          '<td class="metric">' + fmtSpeed(m.avgLatencyMs) + '</td>';
+        tr.innerHTML = '<td class="rank">' + rank + '</td>' +
+          '<td class="model">' + (m.name || "") + ' ' + (prov[0] ? '<span class="prov-badge ' + prov[1] + '">' + prov[0] + '</span>' : '') + '</td>' +
+          '<td class="metric">' + val + '</td>';
         body.appendChild(tr);
       });
     }
+
+    function render(data) {
+      var status = document.getElementById("status");
+      var models = (data && data.models) || [];
+      if (!models.length) { status.textContent = "No results yet — the monthly benchmark hasn't run."; return; }
+      var when = data.generatedAt ? new Date(data.generatedAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
+      var runs = models[0] && models[0].problemsTested && models[0].attemptsPerProblem
+        ? (models[0].problemsTested + " problems × " + models[0].attemptsPerProblem + " attempts") : "";
+      status.textContent = (data.month ? data.month + " · " : "") + (runs ? runs + " · " : "") + (when ? "updated " + when : "");
+      renderPodium(models);
+      renderBoard(models, "acc-body", "acc");
+      renderBoard(models, "spd-body", "spd");
+    }
+
     fetch(BACKEND + "/leaderboard/results")
       .then(function (r) { return r.json(); })
       .then(render)
