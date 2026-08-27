@@ -22,6 +22,33 @@ function extractVerilog(text) {
 }
 
 // Dependencies before dependents. Returns { order, cycle }.
+// Group topo-sorted modules into DEPENDENCY LEVELS: level 0 = modules with no
+// (planned) dependencies; a module's level is 1 + the max level of its deps. All
+// modules in a level are independent of each other, so they can build concurrently.
+function topoLevels(order) {
+  const lvl = {};
+  order.forEach((m) => {
+    let L = 0;
+    (m.dependsOn || []).forEach((d) => { if (lvl[d] != null) L = Math.max(L, lvl[d] + 1); });
+    lvl[m.name] = L;
+  });
+  const groups = [];
+  order.forEach((m) => { const L = lvl[m.name]; (groups[L] = groups[L] || []).push(m); });
+  return groups.filter(Boolean);
+}
+
+// Run fn over items with a concurrency cap, preserving result order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let idx = 0;
+  async function worker() { while (idx < items.length) { const i = idx++; out[i] = await fn(items[i]); } }
+  const workers = [];
+  const n = Math.min(Math.max(1, limit), items.length);
+  for (let w = 0; w < n; w++) workers.push(worker());
+  await Promise.all(workers);
+  return out;
+}
+
 function topoSort(modules) {
   const byName = {};
   modules.forEach((m) => (byName[m.name] = m));
@@ -1079,9 +1106,26 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
   }
   const results = [];
   const summaries = [];
-  for (const mod of order) {
-    // Cooperative stop: bail cleanly between modules if the client cancelled.
-    if (shouldStop()) { stopped = true; if (onProgress) onProgress({ type: "stopped", module: mod.name }); break; }
+
+  // Resolve any pending budget decision (was per-module; now once per level).
+  async function resolveBudgetDecision() {
+    if (!fixBudget.needsDecision) return;
+    fixBudget.needsDecision = false;
+    if (decide) {
+      let choice = "continue";
+      try { choice = await decide({ used: fixBudget.used, allowRaise: !raisedCutoff }); } catch (_) {}
+      if (choice === "buildOnly") { stopTests = true; if (onProgress) onProgress({ type: "budgetDecided", choice: "buildOnly" }); }
+      else if (choice === "raiseCutoff" && !raisedCutoff) { raisedCutoff = true; cutoff = 50; if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
+      else if (onProgress) onProgress({ type: "budgetDecided", choice: "continue" });
+    } else if (onProgress) {
+      onProgress({ type: "budgetWarn", used: fixBudget.used, threshold: fixBudget.warnAt });
+    }
+  }
+
+  // Build + verify ONE module. Independent modules (same dependency level) run this
+  // concurrently. Returns { r } (or { skip:true } for an already-built/resumed one).
+  // Shared state is safe under JS single-threaded async; compiles use isolated temp dirs.
+  async function processModule(mod) {
     // Resume: if this module is already built (from seedFiles) and still compiles,
     // keep it and skip the rebuild + verification entirely.
     if (seedFiles && builtFiles[mod.name]) {
@@ -1089,22 +1133,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       if (chk.ok) {
         const e0 = manifestByName[mod.name]; if (e0) e0.built = true;
         if (onProgress) onProgress({ type: "skipped", module: mod.name, reason: "already built" });
-        continue;
-      }
-    }
-    // Verification passed the soft threshold last iteration → resolve the policy
-    // before doing any more verification. Interactive flow asks; else just warn.
-    // Re-ask only offers the reduce-LLM-call options not already taken.
-    if (fixBudget.needsDecision) {
-      fixBudget.needsDecision = false;
-      if (decide) {
-        let choice = "continue";
-        try { choice = await decide({ used: fixBudget.used, allowRaise: !raisedCutoff }); } catch (_) {}
-        if (choice === "buildOnly") { stopTests = true; if (onProgress) onProgress({ type: "budgetDecided", choice: "buildOnly" }); }
-        else if (choice === "raiseCutoff" && !raisedCutoff) { raisedCutoff = true; cutoff = 50; if (onProgress) onProgress({ type: "budgetDecided", choice: "raiseCutoff", cutoff: cutoff }); }
-        else if (onProgress) onProgress({ type: "budgetDecided", choice: "continue" });
-      } else if (onProgress) {
-        onProgress({ type: "budgetWarn", used: fixBudget.used, threshold: fixBudget.warnAt });
+        return { skip: true };
       }
     }
     if (onProgress) onProgress({ type: "building", module: mod.name });
@@ -1296,7 +1325,6 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
           });
       }
     }
-    results.push(r);
     if (onProgress) {
       if (r.ok && builtFiles[mod.name]) // stream the final code so a stop preserves progress
         onProgress({ type: "file", name: mod.name + ".v", code: builtFiles[mod.name] });
@@ -1308,7 +1336,26 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         error: r.error,
       });
     }
-    if (!r.ok) break; // stop the run if a module can't be made to compile
+    return { r: r };
+  } // end processModule
+
+  // Drive the build level-by-level: modules with no unbuilt dependencies run
+  // concurrently (capped), so independent modules aren't serialized.
+  const levels = topoLevels(order);
+  const BUILD_CONCURRENCY = 4;
+  buildLoop:
+  for (const level of levels) {
+    if (shouldStop()) { stopped = true; if (onProgress) onProgress({ type: "stopped" }); break; }
+    await resolveBudgetDecision();
+    const levelOut = await mapLimit(level, BUILD_CONCURRENCY, processModule);
+    let levelFailed = false;
+    for (let i = 0; i < level.length; i++) {
+      const out = levelOut[i];
+      if (!out || out.skip) continue;
+      results.push(out.r);                 // in topo order (mapLimit preserves order)
+      if (!out.r.ok) levelFailed = true;   // a module couldn't be made to compile
+    }
+    if (levelFailed) break; // stop before the next level; siblings already recorded
   }
 
   // Effective complexity: a module's own complexity PLUS the effective complexity
