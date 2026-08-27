@@ -1,0 +1,11 @@
+{
+  "name": "leaderboard-pluto-harness",
+  "version": "1.0.0",
+  "description": "Monthly LLM benchmark on the Pluto medium problem set — accuracy (Pluto testbenches via iverilog) + speed (API latency) → leaderboard results.json",
+  "type": "commonjs",
+  "scripts": {
+    "run": "node src/index.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {}
+}

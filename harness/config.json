@@ -1,0 +1,168 @@
+{
+  "_comment": "Point at your Pluto clone and list the leaderboard models. Keys are read from env vars named in keyEnv / flow.keyEnv (see .env.example). Nothing secret lives here.",
+  "mode": "agentic",
+  "_mode_comment": "'agentic' = drive your backend's Verifier->Builder pipeline (specs auto-approved) per problem. 'direct' = single raw model call. Override per run with HARNESS_MODE=direct|agentic.",
+  "backendUrl": "https://verilogprojectcreate.duckdns.org",
+  "_backendUrl_comment": "Base URL of your build backend for agentic mode, e.g. http://localhost:3000 or https://your-ec2-host. Override with HARNESS_BACKEND_URL. Only used in agentic mode.",
+  "plutoRepo": "/home/ubuntu/pluto",
+  "problemsSubdir": "problems/medium",
+  "problemsPerRun": 3,
+  "attemptsPerProblem": 3,
+  "_attempts_comment": "Each picked problem is run this many times; per-problem accuracy = passes/attempts, and the model score is the average across problems. Override per run with HARNESS_ATTEMPTS.",
+  "systemPrompt": "You are a professional Verilog designer. Implement exactly what the prompt asks. Output ONLY the synthesizable Verilog module inside a single ```verilog code block \u2014 no explanation, no testbench.",
+  "iverilogTimeoutMs": 20000,
+  "vvpTimeoutMs": 30000,
+  "models": [
+    {
+      "name": "Claude Opus 5",
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "keyEnv": "ANTHROPIC_API_KEY",
+      "flow": {
+        "provider": "anthropic",
+        "model": "claude-opus-5",
+        "keyEnv": "ANTHROPIC_API_KEY"
+      }
+    },
+    {
+      "name": "Claude Sonnet 5",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "keyEnv": "ANTHROPIC_API_KEY",
+      "flow": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "keyEnv": "ANTHROPIC_API_KEY"
+      }
+    },
+    {
+      "name": "Claude Haiku 4.5",
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "keyEnv": "ANTHROPIC_API_KEY",
+      "flow": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "keyEnv": "ANTHROPIC_API_KEY"
+      }
+    },
+    {
+      "name": "GPT-5",
+      "provider": "openai-compatible",
+      "model": "gpt-5",
+      "baseURL": "https://api.openai.com/v1",
+      "keyEnv": "OPENAI_API_KEY",
+      "flow": {
+        "provider": "openai",
+        "model": "gpt-5",
+        "keyEnv": "OPENAI_API_KEY"
+      }
+    },
+    {
+      "name": "GPT-5 mini",
+      "provider": "openai-compatible",
+      "model": "gpt-5-mini",
+      "baseURL": "https://api.openai.com/v1",
+      "keyEnv": "OPENAI_API_KEY",
+      "flow": {
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "keyEnv": "OPENAI_API_KEY"
+      }
+    },
+    {
+      "name": "Gemini 3.1 Pro Preview",
+      "provider": "google",
+      "model": "gemini-3.1-pro-preview",
+      "keyEnv": "GOOGLE_API_KEY",
+      "flow": {
+        "provider": "google",
+        "model": "gemini-3.1-pro-preview",
+        "keyEnv": "GOOGLE_API_KEY"
+      }
+    },
+    {
+      "name": "Gemini 3.1 Flash-Lite",
+      "provider": "google",
+      "model": "gemini-3.1-flash-lite",
+      "keyEnv": "GOOGLE_API_KEY",
+      "flow": {
+        "provider": "google",
+        "model": "gemini-3.1-flash-lite",
+        "keyEnv": "GOOGLE_API_KEY"
+      }
+    },
+    {
+      "name": "DeepSeek-R1",
+      "provider": "bedrock",
+      "model": "us.deepseek.r1-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.deepseek.r1-v1:0"
+      }
+    },
+    {
+      "name": "DeepSeek-V3.1",
+      "provider": "bedrock",
+      "model": "deepseek.v3-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "deepseek.v3-v1:0"
+      }
+    },
+    {
+      "name": "DeepSeek-V3.2",
+      "provider": "bedrock",
+      "model": "deepseek.v3.2",
+      "flow": {
+        "provider": "bedrock",
+        "model": "deepseek.v3.2"
+      }
+    },
+    {
+      "name": "Llama 4 Maverick 17B",
+      "provider": "bedrock",
+      "model": "us.meta.llama4-maverick-17b-instruct-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.meta.llama4-maverick-17b-instruct-v1:0"
+      }
+    },
+    {
+      "name": "Llama 4 Scout 17B",
+      "provider": "bedrock",
+      "model": "us.meta.llama4-scout-17b-instruct-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.meta.llama4-scout-17b-instruct-v1:0"
+      }
+    },
+    {
+      "name": "Llama 3.3 70B",
+      "provider": "bedrock",
+      "model": "us.meta.llama3-3-70b-instruct-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.meta.llama3-3-70b-instruct-v1:0"
+      }
+    },
+    {
+      "name": "Llama 3.1 70B",
+      "provider": "bedrock",
+      "model": "us.meta.llama3-1-70b-instruct-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.meta.llama3-1-70b-instruct-v1:0"
+      }
+    },
+    {
+      "name": "Llama 3.1 8B",
+      "provider": "bedrock",
+      "model": "us.meta.llama3-1-8b-instruct-v1:0",
+      "flow": {
+        "provider": "bedrock",
+        "model": "us.meta.llama3-1-8b-instruct-v1:0"
+      }
+    }
+  ]
+}

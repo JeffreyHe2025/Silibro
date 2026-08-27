@@ -107,8 +107,9 @@
     </div>
 
     <p class="note" id="method-note">
-      Results are produced by the monthly Pluto harness and are read live from the backend. A dash (—) means a
-      model wasn't tested this run (e.g. no API key configured).
+      Results are produced by the monthly Pluto benchmark (1st of each month) and read live from the backend.
+      Only models tested this month are shown — a model dropped from the run disappears next month; newly-added
+      models appear.
     </p>
   </div>
 
@@ -188,7 +189,9 @@
 
     function render(data) {
       var status = document.getElementById("status");
-      var models = (data && data.models) || [];
+      // Only models actually tested this run appear — untested/skipped ones drop off,
+      // and newly-tested models show up automatically (each run overwrites the board).
+      var models = ((data && data.models) || []).filter(function (m) { return m.accuracyPct != null; });
       if (!models.length) { status.textContent = "No results yet — the monthly benchmark hasn't run."; return; }
       var when = data.generatedAt ? new Date(data.generatedAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
       var runs = models[0] && models[0].problemsTested && models[0].attemptsPerProblem
