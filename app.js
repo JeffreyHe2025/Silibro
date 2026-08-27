@@ -561,7 +561,7 @@
     closeEditorPanel();
     initEditor();
     loadProjects();
-    loadConversations();
+    loadConversations(true); // initial restore of last chat
     renderChatView();
   }
 
@@ -3104,11 +3104,13 @@
     chatHistory.forEach(function (m) { appendChatMsg(m.role, m.content); });
   }
 
-  async function loadConversations() {
+  async function loadConversations(autoOpen) {
     var res = await dbListConversations();
     conversations = res.data || [];
     renderHistoryList();
-    if (chatHistory.length === 0 && conversations.length > 0 && currentConversationId == null) {
+    // Only the initial sign-in load restores the last chat. Opening the history
+    // list (☰) must NOT auto-open, or it boots the user straight into a chat.
+    if (autoOpen && chatHistory.length === 0 && conversations.length > 0 && currentConversationId == null) {
       var lastId = localStorage.getItem("last_conversation_id");
       if (lastId && conversations.find(function(c) { return c.id === lastId; })) {
         openConversation(lastId);
