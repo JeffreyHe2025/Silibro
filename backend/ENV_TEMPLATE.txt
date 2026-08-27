@@ -58,3 +58,6 @@ FREE_TIER_MONTHLY_CAP_USD=250
 # it there: alter table billing_accounts alter column monthly_token_cap set default <micros>;
 ANON_COOKIE_SECRET=
 ALLOWED_ORIGINS=
+
+# Comma-separated emails allowed to use the /admin key-import page (the developer).
+ADMIN_EMAILS=

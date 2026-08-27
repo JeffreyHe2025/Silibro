@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Developer — Benchmark Keys</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f6f8; color: #1c1e21;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .topbar { background: #1f2937; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    .back-link { color: #cbd5e1; text-decoration: none; font-size: 14px; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; padding: 6px 12px; }
+    .back-link:hover { background: rgba(255,255,255,0.12); color: #fff; }
+    .wrap { max-width: 640px; margin: 0 auto; padding: 28px 20px 60px; }
+    .intro { color: #4b5563; font-size: 15px; line-height: 1.5; margin: 0 0 20px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }
+    .row { margin-bottom: 16px; }
+    .row label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+    .row .hint { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+    .row .status { font-size: 12px; font-weight: 600; margin-left: 8px; }
+    .status.set { color: #1a7f37; } .status.unset { color: #9ca3af; }
+    input[type=password], input[type=text] { width: 100%; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-family: ui-monospace, Menlo, monospace; }
+    .btn { background: #1f2937; color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn:hover { background: #374151; } .btn:disabled { opacity: .5; cursor: default; }
+    .msg { margin-top: 14px; font-size: 13px; }
+    .msg.err { color: #b91c1c; } .msg.ok { color: #1a7f37; }
+    .gate { color: #6b7280; font-size: 15px; line-height: 1.5; }
+    .gate a { color: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <h1>🔐 Benchmark Keys</h1>
+    <a class="back-link" href="/">← Back to Verilog Coder</a>
+  </header>
+  <main class="wrap">
+    <p class="intro">
+      Developer-only. Import provider API keys the <b>monthly benchmark</b> uses to run BYOK models
+      (Claude, GPT, Gemini) — in addition to the Bedrock models. Keys are stored on the backend and never shown again.
+    </p>
+    <div id="gate" class="gate">Checking access…</div>
+    <div id="panel" class="card" style="display:none;">
+      <div id="fields"></div>
+      <button id="save" class="btn">Save keys</button>
+      <div id="msg" class="msg"></div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/config.js"></script>
+  <script>
+    var BACKEND = "https://verilogprojectcreate.duckdns.org";
+    var FIELDS = [
+      { k: "ANTHROPIC_API_KEY", label: "Anthropic (Claude)", hint: "console.anthropic.com — runs the Claude models" },
+      { k: "OPENAI_API_KEY",    label: "OpenAI (ChatGPT/GPT)", hint: "platform.openai.com — runs the GPT models" },
+      { k: "GOOGLE_API_KEY",    label: "Google (Gemini)", hint: "aistudio.google.com — runs the Gemini models" },
+      { k: "DEEPSEEK_API_KEY",  label: "DeepSeek (optional)", hint: "optional — DeepSeek also runs via Bedrock" },
+      { k: "OPENROUTER_API_KEY",label: "OpenRouter (optional)", hint: "optional — Llama also runs via Bedrock" }
+    ];
+    var cfg = window.SUPABASE_CONFIG || {};
+    var sb = window.supabase.createClient(cfg.url, cfg.anonKey);
+
+    async function jwt() {
+      var r = await sb.auth.getSession();
+      return r && r.data && r.data.session && r.data.session.access_token;
+    }
+    function esc(s){ return String(s).replace(/[&<>"]/g, function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+    function renderFields(status) {
+      var html = "";
+      FIELDS.forEach(function (f) {
+        var st = (status && status[f.k]) || "unset";
+        var isSet = st !== "unset";
+        html += '<div class="row"><label>' + esc(f.label) +
+          '<span class="status ' + (isSet ? "set" : "unset") + '">' + (isSet ? esc(st) : "not set") + '</span></label>' +
+          '<div class="hint">' + esc(f.hint) + '</div>' +
+          '<input type="password" data-k="' + f.k + '" placeholder="' + (isSet ? "•••• (leave blank to keep, clear text to remove)" : "paste key…") + '" /></div>';
+      });
+      document.getElementById("fields").innerHTML = html;
+    }
+
+    async function init() {
+      var tok = await jwt();
+      var gate = document.getElementById("gate");
+      if (!tok) {
+        gate.innerHTML = 'Sign in on the <a href="/">main app</a> first (with the developer account), then reload this page.';
+        return;
+      }
+      try {
+        var r = await fetch(BACKEND + "/admin/keys/status", { headers: { Authorization: "Bearer " + tok } });
+        if (r.status === 403) { gate.textContent = "This account isn't authorized for the developer key page."; return; }
+        if (!r.ok) { var e = await r.json().catch(function(){return{};}); gate.textContent = "Error: " + (e.error || r.status); return; }
+        var d = await r.json();
+        gate.style.display = "none";
+        document.getElementById("panel").style.display = "block";
+        renderFields(d.status);
+      } catch (e) { gate.textContent = "Couldn't reach the backend: " + (e.message || e); }
+    }
+
+    document.getElementById("save").addEventListener("click", async function () {
+      var btn = this, msg = document.getElementById("msg");
+      msg.className = "msg"; msg.textContent = "";
+      var payload = {};
+      document.querySelectorAll("#fields input").forEach(function (inp) {
+        var v = inp.value; // only send fields the user typed into (blank = keep existing)
+        if (v !== "") payload[inp.getAttribute("data-k")] = v.trim();
+      });
+      if (!Object.keys(payload).length) { msg.className = "msg err"; msg.textContent = "Nothing to save — type a key (or clear one to remove it)."; return; }
+      btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        var tok = await jwt();
+        var r = await fetch(BACKEND + "/admin/keys", {
+          method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + tok },
+          body: JSON.stringify(payload)
+        });
+        var d = await r.json();
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        renderFields(d.status);
+        msg.className = "msg ok"; msg.textContent = "Saved. The monthly benchmark will use these keys.";
+      } catch (e) { msg.className = "msg err"; msg.textContent = "Save failed: " + (e.message || e); }
+      finally { btn.disabled = false; btn.textContent = "Save keys"; }
+    });
+
+    init();
+  </script>
+</body>
+</html>

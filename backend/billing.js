@@ -60,6 +60,21 @@ async function authUserOptional(req) {
   try { return await authUser(req); } catch (e) { return null; }
 }
 
+// Verify the caller is a DEVELOPER (admin). Valid JWT AND email in ADMIN_EMAILS
+// (comma-separated env). Returns { id, email }. Used to gate the key-import page.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map(function (e) { return e.trim().toLowerCase(); }).filter(Boolean);
+async function authAdmin(req) {
+  if (!admin) { const e = new Error("auth not configured"); e.status = 500; throw e; }
+  const h = req.headers["authorization"] || "";
+  const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+  if (!token) { const e = new Error("sign in required"); e.status = 401; throw e; }
+  const { data, error } = await admin.auth.getUser(token);
+  if (error || !data || !data.user) { const e = new Error("invalid session"); e.status = 401; throw e; }
+  const email = String(data.user.email || "").toLowerCase();
+  if (!ADMIN_EMAILS.length || ADMIN_EMAILS.indexOf(email) < 0) { const e = new Error("not authorized"); e.status = 403; throw e; }
+  return { id: data.user.id, email: email };
+}
+
 // ---- Anonymous (cookie-tracked) free tier ----------------------------------
 // Mirrors the signed-in token free tier, but keyed on a random anon_id the
 // backend keeps in a signed httpOnly cookie. No IP involved.
@@ -246,7 +261,7 @@ const billingWebhook = [
 ];
 
 module.exports = {
-  billingReady, authUser, authUserOptional, assertCredits, chargeUsage,
+  billingReady, authUser, authUserOptional, authAdmin, assertCredits, chargeUsage,
   getBalance, getStatus,
   anonStatus, assertCreditsAnon, chargeUsageAnon,
   freeTierOpen, freeTierSpendMicros,

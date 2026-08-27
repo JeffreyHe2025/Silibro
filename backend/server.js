@@ -20,7 +20,7 @@ const { compileVerilog, compileReport, runTestbench, synthesizeProject } = requi
 const { startFlow, resumeFlow, resolveDecision, requestStop, isStopped } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
 const {
-  billingReady, authUser, authUserOptional, assertCredits, chargeUsage, getStatus,
+  billingReady, authUser, authUserOptional, authAdmin, assertCredits, chargeUsage, getStatus,
   anonStatus, assertCreditsAnon, chargeUsageAnon,
   freeTierOpen, freeTierSpendMicros,
   billingRouter, billingWebhook,
@@ -193,6 +193,44 @@ app.get("/leaderboard/results", (_req, res) => {
     if (!fs.existsSync(LEADERBOARD_FILE)) return res.json({ models: [], empty: true });
     res.type("application/json").send(fs.readFileSync(LEADERBOARD_FILE, "utf8"));
   } catch (e) { res.status(500).json({ error: String((e && e.message) || e) }); }
+});
+
+// ---- Developer BYOK keys for the monthly harness ----------------------------
+// The developer imports provider API keys on the /admin page (gated to admin
+// emails); the harness reads them (token-auth) and runs those models monthly in
+// addition to Bedrock. Stored server-side only, never returned to a browser.
+const DEV_KEYS_FILE = path.join(__dirname, "dev-keys.json");
+const DEV_KEY_NAMES = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"];
+function readDevKeys() { try { return JSON.parse(fs.readFileSync(DEV_KEYS_FILE, "utf8")); } catch (e) { return {}; } }
+function writeDevKeys(o) { fs.writeFileSync(DEV_KEYS_FILE, JSON.stringify(o)); }
+function maskKeys(store) {
+  const out = {};
+  DEV_KEY_NAMES.forEach(function (k) {
+    const v = store[k];
+    out[k] = v ? ("set (" + v.slice(0, 4) + "…" + v.slice(-2) + ")") : "unset";
+  });
+  return out;
+}
+// Developer saves/updates keys (empty string clears one).
+app.post("/admin/keys", async (req, res) => {
+  try { await authAdmin(req); } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); }
+  const body = req.body || {};
+  const store = readDevKeys();
+  DEV_KEY_NAMES.forEach(function (k) {
+    if (typeof body[k] === "string") { const v = body[k].trim(); if (v) store[k] = v; else delete store[k]; }
+  });
+  try { writeDevKeys(store); } catch (e) { return res.status(500).json({ error: String((e && e.message) || e) }); }
+  res.json({ ok: true, status: maskKeys(store) });
+});
+// Masked status for the admin page (never the raw values).
+app.get("/admin/keys/status", async (req, res) => {
+  try { await authAdmin(req); } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); }
+  res.json({ status: maskKeys(readDevKeys()), names: DEV_KEY_NAMES });
+});
+// Raw keys for the harness only (harness token / Bearer). Never for the browser.
+app.get("/admin/keys", (req, res) => {
+  if (!leaderboardAuthed(req)) return res.status(401).json({ error: "unauthorized" });
+  res.json(readDevKeys());
 });
 
 // Compile-check arbitrary files (used by the frontend's loop / testbenches).
