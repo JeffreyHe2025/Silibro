@@ -520,7 +520,7 @@
 
     var op =
       authMode === "signup"
-        ? sb.auth.signUp({ email: email, password: password })
+        ? sb.auth.signUp({ email: email, password: password, options: { emailRedirectTo: location.origin + "/confirmed/" } })
         : sb.auth.signInWithPassword({ email: email, password: password });
 
     op.then(function (res) {

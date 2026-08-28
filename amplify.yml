@@ -9,7 +9,7 @@ frontend:
         - rm -rf dist && mkdir dist
         - cp index.html app.js styles.css config.js dist/
         # Extra pages served at /models/ and /leaderboard/ (folder + index.html).
-        - cp -R models leaderboard admin dist/
+        - cp -R models leaderboard admin confirmed dist/
         # If you add frontend assets later (e.g. favicon.ico, images/),
         # add them to the lines above so they get published.
   artifacts:
