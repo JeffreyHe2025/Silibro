@@ -230,14 +230,20 @@ Every function writes files to a fresh `fs.mkdtempSync` dir and shells out:
   cookie / a 401/402 can be returned as a normal response.
 
 ### 3.6 Database objects (SQL files)
-- App: `projects`, `files`, `conversations` (each RLS owner-only).
+**The complete SQL contract — every table, column, RLS policy, function body, trigger,
+run order, and the token→dollar migration — is specified in `SPECS-SQL.md`.** Write
+the SQL from that document. Summary:
+- App: `projects`, `files`, `conversations` (each RLS owner-only; shared
+  `set_updated_at()` trigger).
 - Billing: `billing_accounts`, `usage_events`, `credit_topups` (+ funcs `charge_user`,
   `add_credits`, `can_spend`, `usage_status`, `roll_period`, `grant_starting_credits`
-  trigger). Free-tier variants migrate token→dollar.
+  trigger). The free tier evolves token→dollar; `charge_user` is redefined across files
+  (final version accumulates raw AWS micros and returns jsonb).
 - Anon: `anon_accounts`, `anon_usage_events` (+ `charge_anon`, `can_spend_anon`,
   `usage_status_anon`, `roll_period_anon`). Sitewide: `free_tier_spend_micros`.
   RLS on, **no policies** → only the service_role (backend) can touch them.
-- All migrations idempotent (`create table if not exists`, `create or replace`).
+- All migrations idempotent. The signup trigger **must be exception-safe** (a throwing
+  trigger causes "Database error saving new user" and rolls back signup).
 
 ---
 
