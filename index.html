@@ -40,7 +40,10 @@
       </label>
       <label class="field hidden" id="auth-confirm-field">
         <span>Confirm password</span>
-        <input id="auth-confirm" type="password" minlength="6" autocomplete="new-password" />
+        <span class="pw-wrap">
+          <input id="auth-confirm" type="password" minlength="6" autocomplete="new-password" />
+          <button id="auth-confirm-show" type="button" class="pw-show" aria-label="Show password" title="Show password">👁</button>
+        </span>
       </label>
       <button id="auth-submit" type="submit" class="btn auth-submit">Sign in</button>
       <p id="auth-message" class="auth-message" role="status"></p>
@@ -348,6 +351,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="config.js?v=62"></script>
-  <script src="app.js?v=76"></script>
+  <script src="app.js?v=77"></script>
 </body>
 </html>

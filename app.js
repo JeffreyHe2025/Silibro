@@ -60,6 +60,7 @@
   var authPassword = $("auth-password");
   var authShow = $("auth-show");
   var authConfirm = $("auth-confirm");
+  var authConfirmShow = $("auth-confirm-show");
   var authConfirmField = $("auth-confirm-field");
   var authSubmit = $("auth-submit");
   var authMessage = $("auth-message");
@@ -483,20 +484,33 @@
       authConfirmField.classList.add("hidden");
     }
     if (authConfirm) authConfirm.value = "";
+    hidePw(authPassword, authShow);   // default OFF every time the form is shown
+    hidePw(authConfirm, authConfirmShow);
     setAuthMessage("");
   }
 
-  // Show/hide the typed password (and the confirm field) so users can check it.
-  if (authShow) {
-    authShow.addEventListener("click", function () {
-      var reveal = authPassword.type === "password";
-      authPassword.type = reveal ? "text" : "password";
-      if (authConfirm) authConfirm.type = reveal ? "text" : "password";
-      authShow.classList.toggle("on", reveal);
-      authShow.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
-      authShow.title = reveal ? "Hide password" : "Show password";
+  // Reset a password field back to hidden ("show password" default off).
+  function hidePw(input, btn) {
+    if (input) input.type = "password";
+    if (btn) {
+      btn.classList.remove("on");
+      btn.setAttribute("aria-label", "Show password");
+      btn.title = "Show password";
+    }
+  }
+  // Toggle one password field's visibility (each eye controls only its own field).
+  function wirePwToggle(input, btn) {
+    if (!input || !btn) return;
+    btn.addEventListener("click", function () {
+      var reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      btn.classList.toggle("on", reveal);
+      btn.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
+      btn.title = reveal ? "Hide password" : "Show password";
     });
   }
+  wirePwToggle(authPassword, authShow);
+  wirePwToggle(authConfirm, authConfirmShow);
 
   authToggleLink.addEventListener("click", function (e) {
     e.preventDefault();
