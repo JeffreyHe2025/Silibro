@@ -58,6 +58,9 @@
   var authTitle = $("auth-title");
   var authEmail = $("auth-email");
   var authPassword = $("auth-password");
+  var authShow = $("auth-show");
+  var authConfirm = $("auth-confirm");
+  var authConfirmField = $("auth-confirm-field");
   var authSubmit = $("auth-submit");
   var authMessage = $("auth-message");
   var authToggleText = $("auth-toggle-text");
@@ -470,14 +473,29 @@
       authToggleText.textContent = "Already have an account?";
       authToggleLink.textContent = "Sign in";
       authPassword.setAttribute("autocomplete", "new-password");
+      authConfirmField.classList.remove("hidden"); // confirm-password only on signup
     } else {
       authTitle.textContent = "Sign in";
       authSubmit.textContent = "Sign in";
       authToggleText.textContent = "Don't have an account?";
       authToggleLink.textContent = "Sign up";
       authPassword.setAttribute("autocomplete", "current-password");
+      authConfirmField.classList.add("hidden");
     }
+    if (authConfirm) authConfirm.value = "";
     setAuthMessage("");
+  }
+
+  // Show/hide the typed password (and the confirm field) so users can check it.
+  if (authShow) {
+    authShow.addEventListener("click", function () {
+      var reveal = authPassword.type === "password";
+      authPassword.type = reveal ? "text" : "password";
+      if (authConfirm) authConfirm.type = reveal ? "text" : "password";
+      authShow.classList.toggle("on", reveal);
+      authShow.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
+      authShow.title = reveal ? "Hide password" : "Show password";
+    });
   }
 
   authToggleLink.addEventListener("click", function (e) {
@@ -490,6 +508,12 @@
     var email = authEmail.value.trim();
     var password = authPassword.value;
     if (!email || !password) return;
+
+    // Sign up: require the password to be typed twice and match.
+    if (authMode === "signup") {
+      if (password.length < 6) { setAuthMessage("Password must be at least 6 characters.", "error"); return; }
+      if (authConfirm.value !== password) { setAuthMessage("Passwords don't match.", "error"); authConfirm.focus(); return; }
+    }
 
     authSubmit.disabled = true;
     setAuthMessage(authMode === "signup" ? "Creating account…" : "Signing in…", "info");
