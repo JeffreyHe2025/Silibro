@@ -543,6 +543,10 @@
         var em = res.error.message || "Something went wrong.";
         if (/email not confirmed|not confirmed/i.test(em)) {
           em = "Please confirm your email first — check your inbox (and spam) for the verification link we sent, then sign in.";
+        } else if (/rate limit|too many requests|for security purposes/i.test(em)) {
+          em = "Too many sign-up attempts right now — please wait a few minutes and try again.";
+        } else if (/already registered|already been registered|user already/i.test(em)) {
+          em = "That email already has an account. Try signing in instead.";
         }
         setAuthMessage(em, "error");
         return;
