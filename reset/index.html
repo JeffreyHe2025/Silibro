@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reset Password — Verilog Coder</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #f5f6f8; color: #1c1e21;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 36px 32px;
+      max-width: 420px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,.06); }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    p.sub { color: #4b5563; font-size: 14px; line-height: 1.5; margin: 0 0 22px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    .pw-wrap { position: relative; display: flex; margin-bottom: 16px; }
+    .pw-wrap input { flex: 1; padding: 10px 40px 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+    .pw-wrap input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+    .pw-show { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 16px; padding: 4px 6px; opacity: .55; }
+    .pw-show:hover { opacity: 1; }
+    .btn { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 10px; padding: 12px; font-size: 15px; font-weight: 600; cursor: pointer; }
+    .btn:hover { background: #1d4ed8; } .btn:disabled { opacity: .5; cursor: default; }
+    .msg { margin: 14px 0 0; font-size: 13px; line-height: 1.45; }
+    .msg.err { color: #dc2626; } .msg.ok { color: #166534; }
+    .home { display: inline-block; margin-top: 18px; color: #2563eb; text-decoration: none; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Set a new password</h1>
+    <p class="sub" id="sub">Enter a new password for your account.</p>
+    <div id="form-wrap">
+      <label for="pw">New password</label>
+      <div class="pw-wrap">
+        <input id="pw" type="password" minlength="6" placeholder="At least 6 characters" />
+        <button class="pw-show" id="pw-show" type="button" aria-label="Show password" title="Show password">👁</button>
+      </div>
+      <label for="pw2">Confirm new password</label>
+      <div class="pw-wrap">
+        <input id="pw2" type="password" minlength="6" placeholder="Re-enter password" />
+        <button class="pw-show" id="pw2-show" type="button" aria-label="Show password" title="Show password">👁</button>
+      </div>
+      <button class="btn" id="save">Update password</button>
+    </div>
+    <p class="msg" id="msg"></p>
+    <a class="home" href="/">← Back to Verilog Coder</a>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/config.js"></script>
+  <script>
+    var cfg = window.SUPABASE_CONFIG || {};
+    var sb = window.supabase.createClient(cfg.url, cfg.anonKey);
+    var msg = document.getElementById("msg");
+    function show(t, ok) { msg.textContent = t; msg.className = "msg " + (ok ? "ok" : "err"); }
+    function wireEye(inp, btn) {
+      btn.addEventListener("click", function () {
+        var r = inp.type === "password"; inp.type = r ? "text" : "password";
+        btn.setAttribute("aria-label", r ? "Hide password" : "Show password");
+      });
+    }
+    wireEye(document.getElementById("pw"), document.getElementById("pw-show"));
+    wireEye(document.getElementById("pw2"), document.getElementById("pw2-show"));
+
+    // Supabase puts a recovery session in the URL hash; the SDK picks it up so
+    // updateUser() can change the password. If there's no session, the link is bad.
+    (async function () {
+      var err = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("error_description");
+      if (err) { document.getElementById("form-wrap").style.display = "none"; show(err.replace(/\+/g, " ") + " — request a new reset link.", false); return; }
+      // give the SDK a moment to parse the recovery token from the hash
+      setTimeout(async function () {
+        var s = await sb.auth.getSession();
+        if (!s.data || !s.data.session) { document.getElementById("sub").textContent = "This reset link is invalid or has expired. Request a new one from the sign-in page."; }
+      }, 400);
+    })();
+
+    document.getElementById("save").addEventListener("click", async function () {
+      var pw = document.getElementById("pw").value, pw2 = document.getElementById("pw2").value;
+      if (pw.length < 6) return show("Password must be at least 6 characters.", false);
+      if (pw !== pw2) return show("Passwords don't match.", false);
+      this.disabled = true; this.textContent = "Updating…";
+      var r = await sb.auth.updateUser({ password: pw });
+      this.disabled = false; this.textContent = "Update password";
+      if (r.error) return show(r.error.message, false);
+      document.getElementById("form-wrap").style.display = "none";
+      show("✅ Password updated! Go back to Verilog Coder and sign in with your new password.", true);
+    });
+  </script>
+</body>
+</html>

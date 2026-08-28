@@ -66,6 +66,8 @@
   var authMessage = $("auth-message");
   var authToggleText = $("auth-toggle-text");
   var authToggleLink = $("auth-toggle-link");
+  var authForgotRow = $("auth-forgot-row");
+  var authForgotLink = $("auth-forgot-link");
 
   var signOutBtn = $("sign-out");
   var signInBtn = $("sign-in");
@@ -475,6 +477,7 @@
       authToggleLink.textContent = "Sign in";
       authPassword.setAttribute("autocomplete", "new-password");
       authConfirmField.classList.remove("hidden"); // confirm-password only on signup
+      if (authForgotRow) authForgotRow.classList.add("hidden"); // forgot only on sign-in
     } else {
       authTitle.textContent = "Sign in";
       authSubmit.textContent = "Sign in";
@@ -482,6 +485,7 @@
       authToggleLink.textContent = "Sign up";
       authPassword.setAttribute("autocomplete", "current-password");
       authConfirmField.classList.add("hidden");
+      if (authForgotRow) authForgotRow.classList.remove("hidden");
     }
     if (authConfirm) authConfirm.value = "";
     hidePw(authPassword, authShow);   // default OFF every time the form is shown
@@ -517,6 +521,20 @@
     setAuthMode(authMode === "signin" ? "signup" : "signin");
   });
 
+  // Forgot password: email the user a reset link that lands on /reset/.
+  if (authForgotLink) {
+    authForgotLink.addEventListener("click", function (e) {
+      e.preventDefault();
+      var email = authEmail.value.trim();
+      if (!email) { setAuthMessage("Enter your email above first, then click “Forgot password?”.", "error"); authEmail.focus(); return; }
+      setAuthMessage("Sending reset link…", "info");
+      sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/reset/" }).then(function (res) {
+        if (res.error) { setAuthMessage(res.error.message, "error"); return; }
+        setAuthMessage("📧 If an account exists for " + email + ", we've sent a password-reset link. Check your inbox (and spam).", "success");
+      });
+    });
+  }
+
   authForm.addEventListener("submit", function (e) {
     e.preventDefault();
     var email = authEmail.value.trim();
@@ -543,10 +561,6 @@
         var em = res.error.message || "Something went wrong.";
         if (/email not confirmed|not confirmed/i.test(em)) {
           em = "Please confirm your email first — check your inbox (and spam) for the verification link we sent, then sign in.";
-        } else if (/rate limit|too many requests|for security purposes/i.test(em)) {
-          em = "Too many sign-up attempts right now — please wait a few minutes and try again.";
-        } else if (/already registered|already been registered|user already/i.test(em)) {
-          em = "That email already has an account. Try signing in instead.";
         }
         setAuthMessage(em, "error");
         return;

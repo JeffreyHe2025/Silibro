@@ -879,6 +879,10 @@ body.chat-docked #chat-expand { display: none; }
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
+.auth-forgot { margin: -4px 0 0; text-align: right; font-size: 13px; }
+.auth-forgot a { color: #2563eb; text-decoration: none; }
+.auth-forgot a:hover { text-decoration: underline; }
+
 /* Password field with an inline show/hide toggle */
 .pw-wrap { position: relative; display: flex; }
 .pw-wrap input { flex: 1; padding-right: 40px; }
