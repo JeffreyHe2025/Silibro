@@ -262,6 +262,16 @@ Node, no deps beyond global `fetch`. Cron on the backend server (1st of month, 0
 - Aggregate: per-problem accuracy = passes/attempts; model accuracy = **average across
   problems**; speed = average latency over all runs. POST to `/leaderboard/results`.
 
+**Modules** (`harness/src/`): `index.js` (orchestrator: load `/admin` config, pick
+problems, loop models × problems × attempts, aggregate, POST), `agentic.js` (drive
+`/flow/start` + auto-approve `/flow/approve`, sending `X-Harness-Token`), `llm.js`
+(direct-mode provider caller, timed), `problems.js` (discover + random-pick Pluto
+problems, load prompt/header/harness files), `extract.js` (`extractVerilog`,
+`parseModules`, `forceHeader`), `score.js` (write files, iverilog+vvp, parse verdict),
+`results.js` (aggregate + write + POST), `env.js` (load `.env`). `config.json` holds the
+fallback model list + defaults; `run-monthly.sh` (cron entry: git-update Pluto, run) and
+`setup-ec2.sh` (deps check, clone `github.com/scale-lab/Pluto`, install the cron).
+
 ---
 
 ## 5. Deployment & conventions (see DEPLOY.md for the full runbook)
@@ -274,3 +284,43 @@ Node, no deps beyond global `fetch`. Cron on the backend server (1st of month, 0
 - Secrets only in `backend/.env` (gitignored); `ENV_TEMPLATE.txt` has placeholders.
   Anon/publishable Supabase key is safe client-side; service_role is backend-only.
 - Style: frontend is framework-free `var`/`function` ES5-ish; backend CommonJS.
+
+---
+
+## 6. Complete file inventory (every tracked file → where it's specified)
+
+To confirm nothing is missing, here is every file in the repo and how it's covered.
+"Recreatable from spec" = an engineer/LLM can write it from this doc; "data asset" =
+must be copied from the repo, cannot be regenerated; "meta" = not application logic.
+
+| File / folder | Coverage |
+| --- | --- |
+| `index.html` | §2.1 (structure), §2.2–2.5 (element behaviors) |
+| `app.js` | §2 (all frontend behavior) |
+| `styles.css` | §2.1 (light theme, `.hidden`); exact CSS at author's discretion |
+| `config.js` | §2.1 + DEPLOY §1 (`SUPABASE_CONFIG`) |
+| `models/`, `leaderboard/`, `admin/`, `confirmed/`, `reset/` (each `index.html`) | §2.1 |
+| `amplify.yml` | §5 + DEPLOY §2 (static build manifest) |
+| `supabase-schema.sql`, `supabase-files-migration.sql`, `supabase-conversations-migration.sql` | **SPECS-SQL.md §1–3** |
+| `backend/server.js` | §3.1 (endpoints), §3.5 (billing middleware) |
+| `backend/llm.js`, `backend/bedrock.js` | §3.2 |
+| `backend/flow.js`, `backend/build.js` | §3.3 |
+| `backend/compile.js`, `backend/smoketb.js` | §3.4 |
+| `backend/billing.js` | §3.5 |
+| `backend/*.sql` (`billing-schema`, `billing-freetier`, `free-credits`, `anon-freetier`, `sitewide-cap`) | **SPECS-SQL.md §4–8** |
+| `backend/free-tokens-setup.sql`, `backend/sync-balances.sql` | optional/unused — SPECS-SQL.md §9 note |
+| `backend/package.json` / `package-lock.json` | deps listed in §3 header; run `npm install` |
+| `backend/ENV_TEMPLATE.txt` | §3 + DEPLOY §3d (the `.env` keys) |
+| `backend/lib/gscl45nm.lib` | **data asset** — Liberty standard-cell file for µm² synthesis. Optional (absent → GE estimate). Copy from repo; see `backend/lib/README.md`. |
+| `harness/src/*.js`, `harness/config.json`, `harness/*.sh` | §4 (per-module) |
+| `harness/package.json` | no dependencies (global `fetch`); §4 header |
+| `README.md`, `backend/README.md`, `harness/README.md`, `backend/lib/README.md`, `DEPLOY.md`, `SPECS.md`, `SPECS-SQL.md` | **meta** (docs, not app logic) |
+| `.gitignore`, `backend/.gitignore`, `harness/.gitignore` | **meta** — ignore `.env`, `node_modules/`, `*-results.json`, `dev-keys.json`, `benchmark-*.json`, `results/`, `run.log` |
+
+**Runtime-generated files (never committed; created by the running app):**
+`backend/.env`, `backend/dev-keys.json` (admin BYOK keys), `backend/benchmark-models.json`,
+`backend/benchmark-run.json`, `backend/leaderboard-results.json`, `harness/.env`,
+`harness/results/`. All are gitignored and created on first use.
+
+**The only non-recreatable file is `backend/lib/gscl45nm.lib`** (a data asset, and
+optional). Everything else is fully specified by SPECS.md + SPECS-SQL.md.

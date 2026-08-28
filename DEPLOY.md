@@ -122,7 +122,14 @@ Caddy/Nginx for TLS, or an Amplify/other reverse proxy.
   models you'll use (Llama, DeepSeek, etc.). Cross-region models use `us.` inference
   profile IDs.
 
-### 3c. Configure and start
+### 3c. Optional data asset: standard-cell library
+`backend/lib/gscl45nm.lib` is a **Liberty standard-cell file** (~260 KB) that makes the
+"Synthesize" feature report real µm² chip area. It's a data asset, **not code** — it
+ships in the repo, so a `git pull` already includes it; nothing to generate. If it's
+ever missing, synthesis still works and falls back to a gate-equivalent estimate (see
+`backend/lib/README.md`).
+
+### 3d. Configure and start
 ```bash
 cd backend
 npm install
@@ -141,16 +148,17 @@ pm2 save
 - `ALLOWED_ORIGINS` — your frontend origin (tightens CORS; blank = reflect any)
 - Stripe keys only if you enable paid credit top-ups.
 
-### 3d. Point the frontend at your backend
-The backend URL is **hard-coded** in the frontend. Update it in **`app.js`**:
-```js
-function getBackendUrl() { return "https://YOUR-BACKEND-HOST"; }
-```
-Also update the `BACKEND` constant near the top of `admin/index.html`,
-`leaderboard/index.html`, and `reset/index.html`/`confirmed/index.html` if present.
-Bump `app.js?v=` and redeploy the frontend.
+### 3e. Point the frontend at your backend
+The backend URL is **hard-coded** in the frontend in exactly **three places** — update
+all three to your backend host:
+- `app.js` → `function getBackendUrl() { return "https://YOUR-BACKEND-HOST"; }`
+- `admin/index.html` → `var BACKEND = "https://YOUR-BACKEND-HOST";`
+- `leaderboard/index.html` → `var BACKEND = "https://YOUR-BACKEND-HOST";`
 
-### 3e. Verify
+(`confirmed/` and `reset/` only talk to Supabase via `/config.js`, so they need no
+backend URL.) Bump `app.js?v=` and redeploy the frontend.
+
+### 3f. Verify
 ```bash
 curl https://YOUR-BACKEND-HOST/health     # {"ok":true}
 curl https://YOUR-BACKEND-HOST/version    # {"commit":"..."} = the running git commit
