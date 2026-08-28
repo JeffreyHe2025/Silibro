@@ -898,10 +898,17 @@ body.chat-docked #chat-expand { display: none; }
   margin: 0;
   font-size: 13px;
   min-height: 18px;
+  line-height: 1.45;
 }
 .auth-message.error { color: #dc2626; }
-.auth-message.success { color: #16a34a; }
 .auth-message.info { color: #2563eb; }
+.auth-message.success {
+  color: #166534;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
 
 .auth-toggle {
   margin: 0;

@@ -526,15 +526,22 @@
     op.then(function (res) {
       authSubmit.disabled = false;
       if (res.error) {
-        setAuthMessage(res.error.message, "error");
+        var em = res.error.message || "Something went wrong.";
+        if (/email not confirmed|not confirmed/i.test(em)) {
+          em = "Please confirm your email first — check your inbox (and spam) for the verification link we sent, then sign in.";
+        }
+        setAuthMessage(em, "error");
         return;
       }
       if (authMode === "signup" && !res.data.session) {
+        // Switch to sign-in first (it clears the message), THEN show the notice,
+        // so the "check your email" prompt isn't wiped out.
+        setAuthMode("signin");
         setAuthMessage(
-          "Account created. Check your email to confirm, then sign in.",
+          "✅ Account created! We've sent a confirmation link to " + email +
+          ". Check your inbox (and spam) to verify your email, then sign in here.",
           "success"
         );
-        setAuthMode("signin");
         return;
       }
       // onAuthStateChange swaps to the app view.
