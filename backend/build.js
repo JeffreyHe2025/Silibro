@@ -315,7 +315,13 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "the sensitivity list (e.g. 'always @(posedge clk or negedge rst_n)'). Match active-high vs active-low.\n" +
       "- The behavior, parameters, and edge cases the spec describes for THIS module.\n" +
       "Re-read this module's section of the spec, then implement it precisely. Output ONLY the module inside a " +
-      "```verilog code block — no prose, no testbench.")) + RESET_REF;
+      "```verilog code block — no prose, no testbench.")) + RESET_REF +
+      // Ask for the module's summary in the SAME response, so we don't spend a second
+      // call re-reading the code. The ```verilog block comes first; a ```json summary
+      // follows. If it's missing/unparseable, the caller falls back to summarizeModule.
+      ("\n\nAFTER the ```verilog code block, ALSO output a ```json code block describing the module you " +
+       "just wrote (base it strictly on YOUR code, NOT on the spec), in exactly this shape:\n" + SUMMARY_JSON_SHAPE +
+       "\nThe ```verilog block MUST come first, then the ```json block — nothing else.");
     let user =
       "Design spec:\n" +
       builderSpec(spec, mod.name) +
@@ -371,7 +377,12 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
         error: res.ok ? "" : String(res.output || "").slice(0, 300),
       });
 
-    if (res.ok) return { name: mod.name, code, attempts: attempt, ok: true };
+    if (res.ok) {
+      // Pull the summary the Builder wrote in the same response (may be null — the
+      // caller then falls back to a separate summarizeModule call).
+      const summary = parseSummaryObject(reply, mod.name);
+      return { name: mod.name, code, summary, attempts: attempt, ok: true };
+    }
     lastErr = res.output;
   }
   return { name: mod.name, code: null, ok: false, attempts: maxTries, error: lastErr };
@@ -503,7 +514,51 @@ function baselineScore(f) {
 // Also produces the LLM's OWN 1–5 complexity rating from the full code — with NO
 // code baseline shown, so it's an independent estimate. buildDesign then averages
 // it with the code-computed score.
-// Returns a structured summary object (complexity = the LLM's own estimate).
+
+// Shared JSON shape for a module summary (interface + conventions + self-rated
+// complexity). Used both by summarizeModule and by the Builder's COMBINED
+// build+summary response (buildModule), so the two stay in sync.
+const SUMMARY_JSON_SHAPE =
+  '{"module":"<name>",' +
+  '"ports":[{"name":"<port>","direction":"input|output|inout","width":"<e.g. 1, [7:0], [WIDTH-1:0]>"}],' +
+  '"parameters":[{"name":"<param>","default":"<value or n/a>"}],' +
+  '"intendedFunction":"<1-3 sentences on what the module does>",' +
+  '"clockReset":{' +
+  '"clockTrigger":"<e.g. posedge clk, negedge clk, or none (purely combinational)>",' +
+  '"clockRate":"<how fast the clock advances work, e.g. one result per clock; or none if combinational>",' +
+  '"clocks":"<single (clk) or multiple (list them)>",' +
+  '"resetType":"<synchronous | asynchronous | none>",' +
+  '"resetTrigger":"<e.g. active-low rst_n, active-high rst, or none>"},' +
+  '"complexity":<integer 1-100>,' +
+  '"complexityRationale":"<one line justifying the score>"}';
+
+// Fallback summary when none can be parsed — never blocks the build (complexity=null
+// means "no LLM estimate"; buildDesign falls back to the code score alone).
+function fallbackSummary(mod) {
+  return { module: mod.name, intendedFunction: mod.purpose || "", complexity: null,
+    complexityRationale: "LLM rating unavailable", note: "summary unavailable" };
+}
+
+// Parse a summary JSON object out of an LLM reply. Tolerant of surrounding prose and
+// of a preceding ```verilog block (the combined build+summary response) — it prefers
+// an explicit ```json fence so it never mistakes Verilog concatenation braces for the
+// object. Returns the normalized summary, or null if none could be parsed.
+function parseSummaryObject(reply, modName) {
+  try {
+    let text = String(reply || "");
+    const jm = text.match(/```json\s*([\s\S]*?)```/i);
+    text = jm ? jm[1] : text.replace(/```[a-z]*|```/gi, "");
+    const obj = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+    obj.module = obj.module || modName;
+    const c = parseInt(obj.complexity, 10);
+    obj.complexity = c >= 1 && c <= 100 ? c : null; // null => LLM value unusable
+    return obj;
+  } catch (e) { return null; }
+}
+
+// Returns a structured summary object (complexity = the LLM's own estimate). Used as
+// a FALLBACK when the Builder didn't already return a summary alongside the code, and
+// to re-describe a module after a conformance fix.
 async function summarizeModule(llm, mod, code) {
   const sys =
     "You are the Builder describing a Verilog module you just wrote, for a separate Verifier " +
@@ -511,40 +566,15 @@ async function summarizeModule(llm, mod, code) {
     "Also give your OWN internal-logic complexity rating from 1 to 100 (1=trivial, 100=extremely complex), " +
     "judging the whole module — datapath width, branching, FSM depth, arithmetic, clock domains, " +
     "resets, and conceptual difficulty. Rate ONLY this module's own logic, not modules it instantiates. " +
-    "Do NOT include any Verilog code. Return ONLY JSON in exactly this shape:\n" +
-    '{"module":"<name>",' +
-    '"ports":[{"name":"<port>","direction":"input|output|inout","width":"<e.g. 1, [7:0], [WIDTH-1:0]>"}],' +
-    '"parameters":[{"name":"<param>","default":"<value or n/a>"}],' +
-    '"intendedFunction":"<1-3 sentences on what the module does>",' +
-    '"clockReset":{' +
-    '"clockTrigger":"<e.g. posedge clk, negedge clk, or none (purely combinational)>",' +
-    '"clockRate":"<how fast the clock advances work, e.g. one result per clock; or none if combinational>",' +
-    '"clocks":"<single (clk) or multiple (list them)>",' +
-    '"resetType":"<synchronous | asynchronous | none>",' +
-    '"resetTrigger":"<e.g. active-low rst_n, active-high rst, or none>"},' +
-    '"complexity":<integer 1-100>,' +
-    '"complexityRationale":"<one line justifying the score>"}';
+    "Do NOT include any Verilog code. Return ONLY JSON in exactly this shape:\n" + SUMMARY_JSON_SHAPE;
   const user =
     "Module '" + mod.name + "' (intended purpose: " + (mod.purpose || "") + "):\n\n" +
     "```verilog\n" + code + "\n```";
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
-    const s = reply.replace(/```json|```/g, "");
-    const obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
-    obj.module = obj.module || mod.name;
-    const c = parseInt(obj.complexity, 10);
-    obj.complexity = c >= 1 && c <= 100 ? c : null; // null => LLM value unusable
-    return obj;
+    return parseSummaryObject(reply, mod.name) || fallbackSummary(mod);
   } catch (e) {
-    // Fallback: never block the build on a summary parse failure. complexity=null
-    // means "no LLM estimate"; buildDesign falls back to the code score alone.
-    return {
-      module: mod.name,
-      intendedFunction: mod.purpose || "",
-      complexity: null,
-      complexityRationale: "LLM rating unavailable",
-      note: "summary unavailable",
-    };
+    return fallbackSummary(mod);
   }
 }
 
@@ -961,31 +991,56 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
 // from all summaries + the spec, and returns a per-module verdict. Seeing the whole
 // design together catches spec violations the one-module-at-a-time check can miss
 // (e.g. a reset style that only reads as wrong against the spec's global rules).
-async function reviewAllConformance(llm, spec, summaries) {
+// ONE call does BOTH the machine-readable per-module verdicts (which drive the
+// auto-fix loop) AND the human-readable prose review (shown to the user) — so the
+// design isn't re-reviewed twice. The verdicts come back in a ```json block and the
+// prose as the Markdown that follows it, so a big free-form review can't corrupt the
+// JSON parse. Returns { verdicts:[{module,conforms,issues}], prose:"<markdown>" }.
+async function reviewAllConformance(llm, spec, summaries, manifest) {
   const sys =
     "You are the Verifier. Given the design spec and a STRUCTURED SUMMARY for each built module " +
-    "(interface, intended function, clock/reset conventions — NOT the source code), decide for EACH " +
-    "module whether it CONFORMS to the spec. Check ports/widths, intended behavior, and the clock/reset " +
-    "style (synchronous vs asynchronous, active-high vs active-low).\n" +
-    "Module NAMES are assigned by the design plan and may differ from names in the spec (the design is " +
-    "split into sub-modules). Do NOT flag module names as violations and never ask to rename — judge ONLY " +
-    "ports, behavior, and reset.\n" +
-    "For every non-conforming module, write EXPLICIT, ACTIONABLE how-to-fix instructions with the exact " +
-    "Verilog edits (e.g. 'change `always @(posedge clk or negedge rst_n)` to `always @(posedge clk)` keeping " +
-    "the `if(!rst_n)` reset inside — makes it synchronous'), not just what is wrong. Return ONLY JSON: " +
-    '{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: numbered explicit how-to-fix instructions with exact edits; else empty>"}]}';
+    "(interface, intended function, clock/reset conventions — NOT the source code), do TWO things:\n" +
+    "1) Decide for EACH module whether it CONFORMS to the spec — ports/widths, intended behavior, and the " +
+    "clock/reset style (synchronous vs asynchronous, active-high vs active-low). For every non-conforming " +
+    "module, write EXPLICIT, ACTIONABLE how-to-fix instructions with the exact Verilog edits (e.g. 'change " +
+    "`always @(posedge clk or negedge rst_n)` to `always @(posedge clk)` keeping the `if(!rst_n)` reset " +
+    "inside — makes it synchronous'), not just what is wrong.\n" +
+    "2) Write a concise Markdown REVIEW for the user: one short section per module (does it match the spec's " +
+    "intent, ports, parameters, and reset?) and a final one-line overall verdict.\n" +
+    "Module NAMES are assigned by the design plan and may differ from names in the spec (the design is split " +
+    "into sub-modules). Do NOT flag module names as violations and never ask to rename — judge ONLY ports, " +
+    "behavior, and reset.\n" +
+    "OUTPUT FORMAT — FIRST a ```json code block with the verdicts:\n" +
+    '```json\n{"modules":[{"module":"<name>","conforms":true|false,"issues":"<if false: numbered explicit ' +
+    'how-to-fix instructions with exact edits; else empty>"}]}\n```\n' +
+    "THEN, after the json block, the Markdown review from step 2 (plain Markdown, NOT inside the json).";
+  const man = manifest || [];
+  const statusRef = man.length
+    ? "\n\nMODULE STATUS (reference — the full module list):\n" +
+      man.map((m) => "- " + m.name + ": " + (m.built ? "built" : "NOT built") +
+        ", " + (m.testbenched ? "testbench passing" : "not yet testbenched")).join("\n")
+    : "";
   const user =
-    "Design spec:\n" + spec + "\n\nModule summaries:\n\n" +
+    "Design spec:\n" + spec + statusRef + "\n\nModule summaries:\n\n" +
     summaries.map((x) => "```json\n" + JSON.stringify(x, null, 2) + "\n```").join("\n\n");
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
-    const t = reply.replace(/```json|```/g, "");
-    const obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
-    return Array.isArray(obj.modules)
-      ? obj.modules.map((m) => ({ module: String((m && m.module) || ""), conforms: m && m.conforms === true, issues: String((m && m.issues) || "") }))
-      : [];
+    // Verdicts from the ```json block (isolated so the prose can't break the parse).
+    const jm = String(reply).match(/```json\s*([\s\S]*?)```/i);
+    const jsonText = jm ? jm[1] : reply;
+    let verdicts = [];
+    try {
+      const obj = JSON.parse(jsonText.slice(jsonText.indexOf("{"), jsonText.lastIndexOf("}") + 1));
+      if (Array.isArray(obj.modules)) verdicts = obj.modules.map((m) => ({
+        module: String((m && m.module) || ""), conforms: m && m.conforms === true, issues: String((m && m.issues) || ""),
+      }));
+    } catch (e) { /* verdicts stay [] → no fixes, same as before on a parse failure */ }
+    // Prose = whatever follows the json block (fallback: reply minus the json/fences).
+    let prose = jm ? reply.slice(reply.indexOf(jm[0]) + jm[0].length).trim() : "";
+    if (!prose) prose = String(reply).replace(/```json[\s\S]*?```/i, "").replace(/```/g, "").trim();
+    return { verdicts, prose };
   } catch (e) {
-    return [];
+    return { verdicts: [], prose: "" };
   }
 }
 
@@ -995,8 +1050,11 @@ async function reviewAllConformance(llm, spec, summaries) {
 // same fix budget, so the op-count policy still governs it.
 async function finalConformanceSweep(ctx) {
   const { llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget } = ctx;
-  if (!summaries.length) return;
-  const verdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  if (!summaries.length) return { review: "" };
+  const manifest = Object.keys(manifestByName).map((k) => manifestByName[k]);
+  // ONE call returns both the verdicts (for the fix loop) and the prose review.
+  let { verdicts, prose } = await reviewAllConformance(verifierLLM, spec, summaries, manifest);
+  let fixedAny = false;
   for (const v of verdicts) {
     if (!v || v.conforms || !v.module || !builtFiles[v.module]) continue; // only real, fixable violations
     const info = manifestByName[v.module] || {};
@@ -1006,6 +1064,7 @@ async function finalConformanceSweep(ctx) {
     const fixed = await fixModuleConformance(llm, spec, mod, builtFiles, v.issues);
     if (!fixed) { if (onProgress) onProgress({ type: "conformance", module: v.module, ok: false, issues: v.issues, phase: "final" }); continue; }
     builtFiles[v.module] = fixed;
+    fixedAny = true;
     const rr = results.find((x) => x && x.name === v.module);
     if (rr) rr.code = fixed;
     const newSummary = await summarizeModule(llm, mod, fixed);
@@ -1016,6 +1075,13 @@ async function finalConformanceSweep(ctx) {
     if (manifestByName[v.module]) manifestByName[v.module].conformance = { ok, issues: ok ? "" : (recheck && recheck.issues) || v.issues };
     if (onProgress) onProgress({ type: "conformance", module: v.module, ok, phase: "final" });
   }
+  // If any module was rewritten, the prose above describes the PRE-fix state — refresh
+  // it over the updated summaries so the review the user sees is accurate.
+  if (fixedAny) {
+    const refreshed = await reviewAllConformance(verifierLLM, spec, summaries, manifest);
+    prose = refreshed.prose || prose;
+  }
+  return { review: prose };
 }
 
 // USER-TRIGGERED RE-FIX from the final review: rewrite the modules the Verifier
@@ -1042,7 +1108,8 @@ async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgr
   }
 
   // Which modules mismatch the spec? Ask the Verifier for a per-module verdict.
-  const verdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  const manRef = list.map((m) => ({ name: m.name, built: true, testbenched: m.verification === "functional" }));
+  const { verdicts } = await reviewAllConformance(verifierLLM, spec, summaries, manRef);
   const bad = verdicts.filter((v) => v && !v.conforms && builtFiles[v.module]);
   onProgress({ type: "refixPlan", modules: bad.map((v) => v.module) });
 
@@ -1077,45 +1144,14 @@ async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgr
     fixed.push(v.module);
   }
 
-  // Fresh overall verdict on the updated summaries.
-  const finalVerdicts = await reviewAllConformance(verifierLLM, spec, summaries);
+  // Fresh overall verdict on the updated summaries (verdicts + prose in one call).
+  const { verdicts: finalVerdicts, prose: finalProse } = await reviewAllConformance(verifierLLM, spec, summaries, manRef);
   const allConform = finalVerdicts.length ? finalVerdicts.every((v) => v.conforms) : true;
-  const reviewText =
-    "**Overall Verdict: " + (allConform ? "PASSED" : "FAILED") + "**\n\n" +
-    finalVerdicts.map((v) => "- **" + v.module + "**: " + (v.conforms ? "conforms" : "MISMATCH \u2014 " + v.issues)).join("\n");
+  const reviewText = finalProse ||
+    ("**Overall Verdict: " + (allConform ? "PASSED" : "FAILED") + "**\n\n" +
+    finalVerdicts.map((v) => "- **" + v.module + "**: " + (v.conforms ? "conforms" : "MISMATCH \u2014 " + v.issues)).join("\n"));
 
   return { files: builtFiles, manifest: list, summaries, review: reviewText, passed: allConform, fixed };
-}
-
-// Verifier's holistic review, written from the Builder's STRUCTURED SUMMARIES (not
-// the source code) against the spec — one Markdown section per module + a final
-// one-line verdict. Shared by the full flow's verifierReview node AND the follow-up
-// edit path (so edits get the same review). `manifest` gives the full module list as
-// reference. Returns "" when there's nothing to review.
-async function reviewSummaries(verifierLLM, spec, summaries, manifest) {
-  if (!summaries || !summaries.length) return "";
-  const sys =
-    "You are the Verifier. You are given the design spec and, for each built module, a STRUCTURED " +
-    "SUMMARY (port list, parameters, intended function, clock/reset conventions). You do NOT see the " +
-    "source code — by design — so judge only from these summaries against the spec. For EACH module, " +
-    "state whether it matches the spec's intent, ports, parameters, and clock/reset requirements. " +
-    "Flag any mismatch, missing port, or wrong reset style specifically.\n" +
-    "Module NAMES are assigned by the design plan and may differ from the names used in the spec (the " +
-    "design is split into sub-modules) — do NOT flag a module's name as a mismatch; judge only ports, " +
-    "parameters, behavior, and reset. Be concise. Output Markdown with one section per module and a " +
-    "final one-line overall verdict.";
-  const man = manifest || [];
-  const statusRef = man.length
-    ? "\n\nMODULE STATUS (reference — the full module list):\n" +
-      man.map((m) => "- " + m.name + ": " + (m.built ? "built" : "NOT built") +
-        ", " + (m.testbenched ? "testbench passing" : "not yet testbenched")).join("\n")
-    : "";
-  const user =
-    "Design spec:\n" + spec + statusRef +
-    "\n\nBuilt module summaries (no code, as provided by the Builder):\n\n" +
-    summaries.map((s) => "```json\n" + JSON.stringify(s, null, 2) + "\n```").join("\n\n");
-  const review = await callLLM(Object.assign({}, verifierLLM, { system: sys, messages: [{ role: "user", content: user }] }));
-  return (review || "").trim();
 }
 
 // llm = the BUILDER (writes/fixes code). verifierLLM = the VERIFIER (writes the
@@ -1244,8 +1280,12 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       }
       const entry = manifestByName[mod.name];
 
-      // Builder describes the module for the Verifier (summary, NOT the code).
-      let summary = await summarizeModule(llm, mod, r.code);
+      // Builder describes the module for the Verifier (summary, NOT the code) — it's
+      // returned alongside the code in ONE call. Fall back to a separate describe call
+      // only when that summary is missing/unparseable. (The deterministic reset fix
+      // above only changes the sensitivity list; resetType is re-derived from the code
+      // just below, so the summary stays accurate.)
+      let summary = r.summary || await summarizeModule(llm, mod, r.code);
       // Trust the CODE over the LLM's self-description for reset type: a wrong
       // summary ("asynchronous" on synchronous code) causes phantom conformance
       // violations the strip can't fix (nothing is wrong in the code).
@@ -1452,11 +1492,15 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
     entry.complexityDeps = added; // not-yet-functionally-verified children that contributed
   }
 
-  // Final safety net: one holistic conformance review over all modules, looping
-  // any flagged violation back to the Builder to fix (skipped if the user chose
-  // "build only" at the budget prompt).
+  // Final safety net: ONE holistic conformance review over all modules — it produces
+  // both the fix-driving verdicts AND the user-facing prose review in a single call,
+  // looping any flagged violation back to the Builder to fix (skipped if the user
+  // chose "build only" at the budget prompt).
+  let review = "";
   if (!stopTests && !stopped) {
-    await finalConformanceSweep({ llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget });
+    if (onProgress && summaries.length) onProgress({ type: "reviewing", count: summaries.length });
+    const sweep = await finalConformanceSweep({ llm, verifierLLM, spec, manifestByName, builtFiles, summaries, results, onProgress, fixBudget });
+    review = (sweep && sweep.review) || "";
   }
 
   return {
@@ -1466,6 +1510,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
     summaries,
     manifest,
     dependencyGraph: dependencyGraphMd(manifest),
+    review: review,
     stopped: stopped,
   };
 }
@@ -1545,4 +1590,4 @@ async function repairProjectTestbench(llm, spec, files, prevCode, compileError) 
   return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
 }
 
-module.exports = { buildDesign, refixFromReview, reviewSummaries, planGraph, planEdit, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };
+module.exports = { buildDesign, refixFromReview, planGraph, planEdit, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };

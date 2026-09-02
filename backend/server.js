@@ -15,7 +15,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
-const { buildDesign, refixFromReview, planEdit, reviewSummaries, generateProjectTestbench, repairProjectTestbench } = require("./build");
+const { buildDesign, refixFromReview, planEdit, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow, resolveDecision, requestStop, isStopped } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
@@ -638,15 +638,10 @@ app.post("/flow/continue", async (req, res) => {
         send({ type: "progress", event: { type: "editPlan", changed: forceRebuild } });
       }
       const control = { seedFiles, shouldStop: () => isStopped(tid), forceRebuild: forceRebuild || undefined };
-      const built = await buildDesign(builder, effSpec, (ev) => send({ type: "progress", event: ev }), verifier, null, control);
-      // Verifier review of the edited/new modules — the SAME review the full flow
-      // gives — so follow-up edits are checked against the (updated) spec too.
-      if (!built.stopped && built.summaries && built.summaries.length) {
-        send({ type: "progress", event: { type: "reviewing", count: built.summaries.length } });
-        try { built.review = await reviewSummaries(verifier, effSpec, built.summaries, built.manifest); }
-        catch (e) { /* review is best-effort — never fail the edit over it */ }
-      }
-      return built;
+      // buildDesign runs the holistic conformance review internally and returns the
+      // prose `review` — so follow-up edits get the SAME verifier review a full build
+      // does, against the (updated) spec.
+      return buildDesign(builder, effSpec, (ev) => send({ type: "progress", event: ev }), verifier, null, control);
     });
     // Return the (possibly updated) spec so the client can save spec.md.
     send({ threadId: tid, done: true, ...out, spec: effSpec, balance, anonTokensRemaining });

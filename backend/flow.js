@@ -15,7 +15,7 @@
 // keyed by threadId, so /flow/start and /flow/approve resume the same run.
 
 const { callLLM } = require("./llm");
-const { buildDesign, reviewSummaries } = require("./build");
+const { buildDesign } = require("./build");
 
 // LangGraph ships as ESM; load it lazily so this CommonJS backend can use it.
 let _lg = null;
@@ -159,31 +159,17 @@ async function getGraph() {
       decide,
       { shouldStop: function () { return isStopped(state.threadId); } }
     );
+    // buildDesign runs the holistic conformance review internally and returns the
+    // prose `review` (verdicts + prose in one call) — so there's no separate review
+    // node; the edit path (server.js /flow/continue) gets the same review the same way.
     return {
       files: out.files || {},
       log: log,
       summaries: out.summaries || [],
       manifest: out.manifest || [],
       dependencyGraph: out.dependencyGraph || "",
+      review: out.review || "",
     };
-  }
-
-  // The Verifier reviews the built modules using ONLY the Builder's summaries
-  // (port list, parameters, intended function, clock/reset conventions) — NOT the
-  // code — so its check is independent: does each module's described interface and
-  // behavior match the spec's intent?
-  async function verifierReview(state) {
-    const summaries = state.summaries || [];
-    if (!summaries.length) return { review: "" };
-    const emit = progressListeners.get(state.threadId);
-    if (emit) emit({ type: "reviewing", count: summaries.length });
-    // Shared with the follow-up edit path (server.js /flow/continue) so both give
-    // the same review; see reviewSummaries in build.js.
-    const review = await reviewSummaries(
-      { provider: state.provider, key: state.key, model: state.verifierModel },
-      state.spec, summaries, state.manifest || []
-    );
-    return { review: review };
   }
 
   function route(state) {
@@ -198,12 +184,10 @@ async function getGraph() {
     .addNode("verifier", verifier)
     .addNode("approval", approval)
     .addNode("builder", builder)
-    .addNode("verifierReview", verifierReview)
     .addEdge(START, "verifier")
     .addConditionalEdges("verifier", routeAfterVerify, { approval: "approval", end: END })
     .addConditionalEdges("approval", route, { verifier: "verifier", builder: "builder" })
-    .addEdge("builder", "verifierReview")
-    .addEdge("verifierReview", END)
+    .addEdge("builder", END)
     .compile({ checkpointer: new MemorySaver() });
 
   return _graph;
