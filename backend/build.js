@@ -225,13 +225,24 @@ async function genInterfaceContract(llm, spec, mod) {
   const sys =
     "Extract ONLY the interface of the Verilog module '" + mod.name + "' from the design spec. " +
     "Return JSON ONLY (no prose, no code), exactly this shape:\n" +
-    '{"parameters":[{"name":"<PARAM>","default":"<value>"}],' +
+    '{"parameters":[{"name":"<PARAM>","default":"<constant>"}],' +
     '"ports":[{"name":"<port>","direction":"input|output|inout","width":"1 | [MSB:LSB] | PARAM"}],' +
     '"reset":{"type":"synchronous|asynchronous|none","polarity":"active-low|active-high|none"}}\n' +
-    "Use EXACTLY the parameter names/defaults and port names, directions and widths the spec states for " +
-    "THIS module. If the spec lists no parameters, use []. width is \"1\" for a single bit, \"[7:0]\" for a " +
-    "bus, or a parameter name like \"DATA_WIDTH\". For reset, report the EXACT type and polarity the spec " +
-    "states (or none if the module has no reset).";
+    "Use EXACTLY the parameter names/defaults and port names, directions and widths the spec states for THIS module.\n" +
+    "STRICT RULES — this JSON is turned DIRECTLY into a Verilog module header, so a placeholder word becomes a " +
+    "compile error. Follow every rule exactly:\n" +
+    "- Every \"name\" MUST be a legal Verilog identifier: letters, digits and underscores only, starting with a " +
+    "letter or underscore, with NO spaces or punctuation (e.g. clk, rst_n, data_out, NUM_DIV). If the spec writes " +
+    "a name with spaces, convert it to snake_case.\n" +
+    "- \"width\" is EXACTLY \"1\" for a single-bit signal, \"[7:0]\" (or \"[MSB:LSB]\") for a bus, or a bare " +
+    "parameter name like \"DATA_WIDTH\". For a 1-bit port write \"1\" — NEVER \"none\", \"n/a\", \"null\", " +
+    "\"single\", \"1 bit\", or \"\".\n" +
+    "- Parameter \"default\" MUST be a numeric or constant literal (e.g. \"4\", \"8\", \"8'hFF\") — NEVER a word " +
+    "like \"none\".\n" +
+    "- If the module has NO parameters, return \"parameters\": [] — do NOT invent a placeholder entry and NEVER " +
+    "emit {\"name\":\"none\"}. List every real port; never emit a placeholder port named \"none\" or \"unused\".\n" +
+    "- The ONLY field where \"none\" is allowed is \"reset\": report the EXACT reset type and polarity the spec " +
+    "states, or {\"type\":\"none\",\"polarity\":\"none\"} if the module has no reset.";
   const user = "Design spec:\n" + builderSpec(spec, mod.name) + "\n\nModule: " + mod.name + (mod.purpose ? " \u2014 " + mod.purpose : "");
   try {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
