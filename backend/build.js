@@ -827,19 +827,23 @@ function attributeCompile(output, tbName) {
 // Repair a functional oracle testbench that FAILED TO COMPILE. Feeds the iverilog
 // error + the previous testbench back to the LLM to fix the TESTBENCH ONLY (never
 // the module under test). Returns { code, top } or null.
-async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, compileError) {
+async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, problem) {
   const ports = (summary && summary.ports) || [];
   const sys =
     "You are a hardware verification engineer. The self-checking Verilog testbench you wrote for module '" +
-    mod.name + "' FAILED TO COMPILE. Fix ONLY the testbench so it compiles, keeping it a valid independent " +
-    "oracle: instantiate the module by its EXACT name and port names, generate a clock + reset if sequential, " +
-    "compute expected outputs from the spec, and print 'FUNC_FAIL' on a mismatch and 'FUNC_PASS' only if all " +
-    "checks pass, then $finish. Do NOT modify or redefine the module under test. Name the testbench 'tb_" +
-    mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no prose, no module under test." + IVERILOG_RULES;
+    mod.name + "' did NOT work — it either FAILED TO COMPILE or RAN WITHOUT printing a verdict. Fix ONLY the " +
+    "testbench so it (a) compiles and (b) ALWAYS prints exactly one verdict. Keep it a valid independent oracle: " +
+    "instantiate the module by its EXACT name and port names, generate a clock + reset if sequential, WAIT enough " +
+    "clock cycles for the outputs to settle, compute expected outputs from the spec, print 'FUNC_FAIL' (with " +
+    "inputs/expected/actual) on any mismatch, print 'FUNC_PASS' at the very end only if every check passed, then " +
+    "call $finish so the simulation cannot hang. Do NOT modify or redefine the module under test. Name the " +
+    "testbench 'tb_" + mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no " +
+    "prose, no module under test." + IVERILOG_RULES;
   const user =
     "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
-    "\n\nThe iverilog COMPILE ERROR from your testbench:\n" + String(compileError || "").slice(0, 800) +
-    "\n\nYour previous (non-compiling) testbench:\n```verilog\n" + prevCode + "\n```" +
+    "\n\nThe PROBLEM with your testbench (a compile error, or it ran but printed no FUNC_PASS/FUNC_FAIL):\n" +
+    String(problem || "").slice(0, 800) +
+    "\n\nYour previous (broken) testbench:\n```verilog\n" + prevCode + "\n```" +
     "\n\nDesign specification (source of truth for expected outputs):\n" + spec;
   const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
   const code = extractVerilog(reply);
@@ -863,12 +867,16 @@ async function funcTest(vllm, spec, entry, builtFiles) {
   if (!ftb || !ftb.code) return { passed: null, details: "no testbench generated", tbBroken: true };
   entry.funcTb = ftb.code; // keep the LLM-written oracle testbench for the Modules view
 
-  const maxTbTries = 3;
+  const maxTbTries = 4;
   for (let tbTry = 1; tbTry <= maxTbTries; tbTry++) {
     const simFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
     simFiles.push({ name: "func_tb.v", code: ftb.code });
     const sim = await runTestbench(simFiles, ftb.top);
 
+    // Two ways an oracle can be BROKEN (as opposed to the module being wrong): it
+    // won't compile, or it compiles+runs but never prints a FUNC_PASS/FUNC_FAIL
+    // verdict. BOTH are the Verifier's testbench to fix — repair and retry either.
+    let problem = null;
     if (sim.compileFailed) {
       const where = attributeCompile(sim.output, "func_tb.v");
       // The module already compiled independently, so a module-attributed error
@@ -876,25 +884,29 @@ async function funcTest(vllm, spec, entry, builtFiles) {
       if (where === "module") {
         return { passed: null, details: "module compile error under test: " + sim.output.slice(0, 200), tbBroken: false };
       }
-      // Broken oracle testbench: repair it and retry, unless out of tries.
-      if (tbTry < maxTbTries) {
-        const repaired = await repairFunctionalTestbench(vllm, mod, spec, entry.summary || {}, ftb.code, sim.output);
-        if (!repaired || !repaired.code) {
-          return { passed: null, details: "testbench won't compile and repair failed: " + sim.output.slice(0, 160), tbBroken: true };
-        }
-        ftb = repaired;
-        entry.funcTb = ftb.code;
-        continue;
-      }
-      return { passed: null, details: "oracle testbench won't compile after " + maxTbTries + " tries: " + sim.output.slice(0, 160), tbBroken: true };
+      problem = "COMPILE ERROR from iverilog:\n" + String(sim.output || "").slice(0, 700);
+    } else {
+      const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
+      if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
+      if (/FUNC_FAIL/.test(sim.output)) return { passed: false, details: markers };
+      // Ran but printed NO verdict — the oracle's checking logic is broken.
+      problem = "The testbench COMPILED and RAN but printed NEITHER 'FUNC_PASS' NOR 'FUNC_FAIL'. " +
+        "Simulator output was:\n" + String(sim.output || "").slice(0, 500);
     }
 
-    const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
-    if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
-    if (/FUNC_FAIL/.test(sim.output)) return { passed: false, details: markers };
-    return { passed: null, details: markers }; // ran but printed no verdict
+    // Out of tries → inconclusive (broken oracle, not a module bug).
+    if (tbTry >= maxTbTries) {
+      return { passed: null, details: "oracle testbench could not be made to work after " + maxTbTries + " tries: " + String(problem).slice(0, 160), tbBroken: true };
+    }
+    // Repair the testbench (feeding back the exact problem) and retry.
+    const repaired = await repairFunctionalTestbench(vllm, mod, spec, entry.summary || {}, ftb.code, problem);
+    if (!repaired || !repaired.code) {
+      return { passed: null, details: "testbench broken and repair failed: " + String(problem).slice(0, 160), tbBroken: true };
+    }
+    ftb = repaired;
+    entry.funcTb = ftb.code;
   }
-  return { passed: null, details: "testbench could not be made to compile", tbBroken: true };
+  return { passed: null, details: "testbench could not be made to work", tbBroken: true };
 }
 
 // Code-generated SMOKE test (no oracle): drive the module and confirm it RUNS
