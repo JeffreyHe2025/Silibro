@@ -377,13 +377,22 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       user +=
         "\n\nIt may instantiate these already-built modules (do not redefine them):\n\n" +
         depContext;
-    if (lastErr)
+    if (lastErr) {
       user +=
         "\n\nYour previous version FAILED to compile with Icarus Verilog:\n" +
         lastErr +
         "\n\nReturn a corrected version of module '" +
         mod.name +
         "'.";
+      // Targeted hint for the strict-enum error, which the model otherwise keeps
+      // reproducing: steer it off SystemVerilog enums entirely.
+      if (/explicit cast/i.test(String(lastErr))) {
+        user +=
+          "\nThe 'explicit cast' error is iverilog's strict SystemVerilog enum rule. REMOVE the 'typedef enum' " +
+          "and rewrite the state encoding with localparam constants and a plain 'logic [N:0] state, next_state;' " +
+          "register — then all your state assignments compile with no casts.";
+      }
+    }
 
     const reply = await callLLM({
       ...llm,
@@ -522,7 +531,15 @@ const RESET_REF =
   "    end\n" +
   "  WRONG: writing 'always @(posedge clk or negedge rst_n)' when the spec asks for a SYNCHRONOUS reset. " +
   "Do NOT default to asynchronous \u2014 use exactly the reset TYPE the spec states, and match active-low " +
-  "(rst_n / !rst_n) vs active-high polarity.";
+  "(rst_n / !rst_n) vs active-high polarity.\n\n" +
+  "FSM STATE ENCODING \u2014 Icarus Verilog is STRICT about SystemVerilog enums and will reject " +
+  "'This assignment requires an explicit cast'. Do NOT use 'typedef enum' for states. Encode states with " +
+  "localparam constants and a PLAIN register instead:\n" +
+  "    localparam [2:0] IDLE = 3'd0, S1 = 3'd1, S2 = 3'd2;\n" +
+  "    logic [2:0] state, next_state;\n" +
+  "    always @(posedge clk) state <= next_state;   // plain assignments, no cast needed\n" +
+  "This avoids all enum-cast errors. If you MUST use an enum, every assignment of a non-enum value has to be " +
+  "cast explicitly, e.g. next_state = state_t'(expr).";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
