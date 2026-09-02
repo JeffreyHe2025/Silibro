@@ -1087,6 +1087,37 @@ async function refixFromReview(llm, verifierLLM, spec, manifest, review, onProgr
   return { files: builtFiles, manifest: list, summaries, review: reviewText, passed: allConform, fixed };
 }
 
+// Verifier's holistic review, written from the Builder's STRUCTURED SUMMARIES (not
+// the source code) against the spec — one Markdown section per module + a final
+// one-line verdict. Shared by the full flow's verifierReview node AND the follow-up
+// edit path (so edits get the same review). `manifest` gives the full module list as
+// reference. Returns "" when there's nothing to review.
+async function reviewSummaries(verifierLLM, spec, summaries, manifest) {
+  if (!summaries || !summaries.length) return "";
+  const sys =
+    "You are the Verifier. You are given the design spec and, for each built module, a STRUCTURED " +
+    "SUMMARY (port list, parameters, intended function, clock/reset conventions). You do NOT see the " +
+    "source code — by design — so judge only from these summaries against the spec. For EACH module, " +
+    "state whether it matches the spec's intent, ports, parameters, and clock/reset requirements. " +
+    "Flag any mismatch, missing port, or wrong reset style specifically.\n" +
+    "Module NAMES are assigned by the design plan and may differ from the names used in the spec (the " +
+    "design is split into sub-modules) — do NOT flag a module's name as a mismatch; judge only ports, " +
+    "parameters, behavior, and reset. Be concise. Output Markdown with one section per module and a " +
+    "final one-line overall verdict.";
+  const man = manifest || [];
+  const statusRef = man.length
+    ? "\n\nMODULE STATUS (reference — the full module list):\n" +
+      man.map((m) => "- " + m.name + ": " + (m.built ? "built" : "NOT built") +
+        ", " + (m.testbenched ? "testbench passing" : "not yet testbenched")).join("\n")
+    : "";
+  const user =
+    "Design spec:\n" + spec + statusRef +
+    "\n\nBuilt module summaries (no code, as provided by the Builder):\n\n" +
+    summaries.map((s) => "```json\n" + JSON.stringify(s, null, 2) + "\n```").join("\n\n");
+  const review = await callLLM(Object.assign({}, verifierLLM, { system: sys, messages: [{ role: "user", content: user }] }));
+  return (review || "").trim();
+}
+
 // llm = the BUILDER (writes/fixes code). verifierLLM = the VERIFIER (writes the
 // functional oracle testbench + reviews spec conformance) — a DIFFERENT model, so
 // the oracle is independent of the code it checks. Falls back to the builder LLM
@@ -1514,4 +1545,4 @@ async function repairProjectTestbench(llm, spec, files, prevCode, compileError) 
   return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
 }
 
-module.exports = { buildDesign, refixFromReview, planGraph, planEdit, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };
+module.exports = { buildDesign, refixFromReview, reviewSummaries, planGraph, planEdit, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };

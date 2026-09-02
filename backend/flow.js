@@ -15,7 +15,7 @@
 // keyed by threadId, so /flow/start and /flow/approve resume the same run.
 
 const { callLLM } = require("./llm");
-const { buildDesign } = require("./build");
+const { buildDesign, reviewSummaries } = require("./build");
 
 // LangGraph ships as ESM; load it lazily so this CommonJS backend can use it.
 let _lg = null;
@@ -177,36 +177,13 @@ async function getGraph() {
     if (!summaries.length) return { review: "" };
     const emit = progressListeners.get(state.threadId);
     if (emit) emit({ type: "reviewing", count: summaries.length });
-    const sys =
-      "You are the Verifier. You are given the design spec and, for each built module, a STRUCTURED " +
-      "SUMMARY (port list, parameters, intended function, clock/reset conventions). You do NOT see the " +
-      "source code — by design — so judge only from these summaries against the spec. For EACH module, " +
-      "state whether it matches the spec's intent, ports, parameters, and clock/reset requirements. " +
-      "Flag any mismatch, missing port, or wrong reset style specifically.\n" +
-      "Module NAMES are assigned by the design plan and may differ from the names used in the spec (the " +
-      "design is split into sub-modules) — do NOT flag a module's name as a mismatch; judge only ports, " +
-      "parameters, behavior, and reset. Be concise. Output Markdown with one section per module and a " +
-      "final one-line overall verdict.";
-    const manifest = state.manifest || [];
-    const statusRef = manifest.length
-      ? "\n\nMODULE STATUS (reference — the full module list):\n" +
-        manifest.map(function (m) {
-          return "- " + m.name + ": " + (m.built ? "built" : "NOT built") +
-            ", " + (m.testbenched ? "testbench passing" : "not yet testbenched");
-        }).join("\n")
-      : "";
-    const user =
-      "Design spec:\n" + state.spec + statusRef +
-      "\n\nBuilt module summaries (no code, as provided by the Builder):\n\n" +
-      summaries.map(function (s) { return "```json\n" + JSON.stringify(s, null, 2) + "\n```"; }).join("\n\n");
-    const review = await callLLM({
-      provider: state.provider,
-      key: state.key,
-      model: state.verifierModel,
-      system: sys,
-      messages: [{ role: "user", content: user }],
-    });
-    return { review: (review || "").trim() };
+    // Shared with the follow-up edit path (server.js /flow/continue) so both give
+    // the same review; see reviewSummaries in build.js.
+    const review = await reviewSummaries(
+      { provider: state.provider, key: state.key, model: state.verifierModel },
+      state.spec, summaries, state.manifest || []
+    );
+    return { review: review };
   }
 
   function route(state) {
