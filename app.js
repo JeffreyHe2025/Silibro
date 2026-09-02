@@ -1859,15 +1859,35 @@
         return;
     }
 
-    // FOLLOW-UP EDIT: if this project already has a built design (a spec + at least
-    // one module), apply the change directly — NO spec-approval popup — and rebuild /
-    // re-testbench only the modules the change affects (see runEditFlow + backend
-    // /flow/continue editRequest). A fresh/empty project falls through to the full flow.
+    // EXISTING DESIGN → classify EDIT vs NEW PROJECT. If the project already has a
+    // design (spec + a module), ask whether the new prompt modifies THIS design or
+    // asks for a different/new one. EDIT → apply in place (no approval popup, rebuild
+    // only affected modules). NEW → open a fresh chat + new project, then run the full
+    // Verifier→approval→Builder flow. Fresh/empty projects fall straight through.
     var existingSpec = designSpecText();
     var existingModules = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
     if (currentProjectId != null && existingSpec && existingModules.length) {
-      await runEditFlow(bubble, fullPrompt, provider, key, model);
-      return;
+      var editIntent = true; // default to EDIT — never silently discard their work
+      if (!imgs.length) {
+        try {
+          var moduleList = existingModules.map(function (f) { return f.name; }).join(", ");
+          var sysEdit = "The user already has a Verilog project (modules: " + moduleList + ").\n" +
+            "Current design spec:\n" + String(existingSpec).slice(0, 1500) + "\n\n" +
+            "Does the user's new message ask to MODIFY or extend THIS design, or to build a DIFFERENT, unrelated NEW design? Reply only EDIT or NEW.";
+          var eRes = await callLLM(provider, key, model, sysEdit, [{ role: "user", content: promptText }]);
+          if (/^\s*new\b/i.test(eRes || "")) editIntent = false;
+        } catch (e) { /* on failure, keep the safe default (edit) */ }
+      }
+      if (editIntent) {
+        await runEditFlow(bubble, fullPrompt, provider, key, model);
+        return;
+      }
+      // NEW project detected: open a fresh chat + deselect the current project, then
+      // fall through to the full build flow (ensureProject creates a new project).
+      startNewProjectContext();
+      appendChatMsg("user", displayUserMsg, imgs);
+      chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
+      bubble = appendChatMsg("assistant", "🆕 New project — writing a fresh spec…");
     }
 
     var ok = await ensureProject(fullPrompt, imgs);
@@ -3281,6 +3301,19 @@
     localStorage.removeItem("last_conversation_id");
     chatConversation.innerHTML = "";
     showConversation();
+  }
+
+  // Start a brand-new project context: deselect the current project (so the next
+  // build creates a fresh one) and open a new chat. Used when the AI detects the
+  // prompt asks for a different/new design rather than an edit of the current one.
+  function startNewProjectContext() {
+    currentProjectId = null;
+    currentFileId = null;
+    files = [];
+    filesSection.classList.add("hidden");
+    closeEditorPanel();
+    renderProjectList();
+    newChat();
   }
 
   // Rough token estimate = chars / 4. When the conversation exceeds the limit,
