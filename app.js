@@ -762,13 +762,18 @@
     restoreProjectToList(pd.project, pd.index);
     openProject(pd.id); // reopen it, restoring the previous view
   }
-  function showDeleteToast(onUndo) {
+  function showUndoToast(message, onUndo) {
     hideDeleteToast();
     var t = document.createElement("div");
     t.className = "undo-toast";
     t.setAttribute("role", "status");
-    t.innerHTML = '<span class="undo-toast-msg">🗑 Deleting project…</span>' +
-      '<span class="undo-toast-action">click to undo</span>';
+    var msg = document.createElement("span");
+    msg.className = "undo-toast-msg";
+    msg.textContent = message;
+    var act = document.createElement("span");
+    act.className = "undo-toast-action";
+    act.textContent = "click to undo";
+    t.appendChild(msg); t.appendChild(act);
     t.addEventListener("click", onUndo);
     document.body.appendChild(t);
     void t.offsetWidth;          // reflow so the fade-in transition runs
@@ -795,7 +800,7 @@
     // Defer the real delete 6s; the toast (click = undo) cancels it.
     pendingProjectDelete = { id: id, project: project, index: index, timer: null };
     pendingProjectDelete.timer = setTimeout(commitPendingProjectDelete, 6000);
-    showDeleteToast(undoPendingProjectDelete);
+    showUndoToast("🗑 Deleting project…", undoPendingProjectDelete);
   });
 
   // ---------------------------------------------------------------------------
@@ -3485,17 +3490,50 @@
     renderHistoryList();
   }
 
-  async function deleteConversation(id) {
-    if (!confirm("Delete this chat?")) return;
-    await dbDeleteConversation(id);
+  // Same snackbar-undo pattern as project delete: remove the chat from the list right
+  // away, show a 6s "click to undo" toast, and DEFER the real DB delete until it expires.
+  var pendingChatDelete = null; // { id, conv, index, wasCurrent, timer }
+
+  function commitPendingChatDelete() {
+    if (!pendingChatDelete) return;
+    var pd = pendingChatDelete;
+    pendingChatDelete = null;
+    if (pd.timer) clearTimeout(pd.timer);
+    hideDeleteToast();
+    dbDeleteConversation(pd.id); // fire-and-forget; the row is already gone from the UI
+  }
+  function undoPendingChatDelete() {
+    if (!pendingChatDelete) return;
+    var pd = pendingChatDelete;
+    pendingChatDelete = null;
+    if (pd.timer) clearTimeout(pd.timer);
+    hideDeleteToast();
+    if (!conversations.some(function (c) { return c.id === pd.conv.id; })) {
+      var i = (pd.index >= 0 && pd.index <= conversations.length) ? pd.index : conversations.length;
+      conversations.splice(i, 0, pd.conv);
+    }
+    renderHistoryList();
+    if (pd.wasCurrent) openConversation(pd.id); // reopen it, restoring the messages
+  }
+
+  function deleteConversation(id) {
+    if (pendingChatDelete) commitPendingChatDelete(); // commit any prior pending delete first
+    var index = conversations.findIndex(function (c) { return c.id === id; });
+    var conv = index >= 0 ? conversations[index] : null;
+    if (!conv) return;
+    var wasCurrent = currentConversationId === id;
+    // Optimistically remove from the list + clear the view if it was open.
     conversations = conversations.filter(function (c) { return c.id !== id; });
-    if (currentConversationId === id) {
+    if (wasCurrent) {
       currentConversationId = null;
       localStorage.removeItem("last_conversation_id");
       chatHistory = [];
       chatConversation.innerHTML = "";
     }
     renderHistoryList();
+    pendingChatDelete = { id: id, conv: conv, index: index, wasCurrent: wasCurrent, timer: null };
+    pendingChatDelete.timer = setTimeout(commitPendingChatDelete, 6000);
+    showUndoToast("🗑 Deleting chat…", undoPendingChatDelete);
   }
 
   function appendChatMsg(role, text, images) {
