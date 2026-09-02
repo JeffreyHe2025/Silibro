@@ -99,6 +99,12 @@ Plus a **harness** (monthly benchmark, Node, no framework) run by cron on the ba
 - Sending a prompt runs the **Verifier → approval → Builder** flow via the backend
   `/flow/*` NDJSON-streaming endpoints (see 3.3). A lightweight LLM "is this a hardware
   build request?" router decides build-vs-chat; off-topic chat is politely declined.
+- **Follow-up edits** (`runEditFlow`): if the current project already has a design (a
+  `spec.md`/session spec **and** ≥1 Verilog module), a new prompt is treated as an EDIT
+  — it skips `/flow/start` + the approval popup and calls **`/flow/continue` with
+  `editRequest`**. The backend updates the spec and rebuilds/re-testbenches **only the
+  affected modules** (see 3.3). The returned updated spec is saved back to `spec.md`.
+  A fresh/empty project falls through to the full Verifier→approval→Builder flow.
 - All Bedrock-capable fetches send `credentials: "include"` + `X-Anon-Id` (see 2.7)
   and the user's JWT via `Authorization` when signed in.
 
@@ -144,7 +150,12 @@ Agentic build (all NDJSON-streaming except `/flow/start`):
   `{offTopic, redirect}`.
 - `POST /flow/approve` {threadId,approved,changes,provider} → resumes; streams build
   events; final line `{done,files,log,manifest,review,...}`.
-- `POST /flow/continue` {spec,files,...} → resume/continue a build from existing files.
+- `POST /flow/continue` {spec,files,...,editRequest?} → resume a stopped build (seed
+  files, skip done modules), OR — when `editRequest` is present — a **follow-up edit**:
+  `planEdit` (Verifier) merges the request into the spec and returns the minimal set of
+  **changed/new modules**; `buildDesign` runs with `control.forceRebuild = changed` so
+  those seeded modules are rebuilt + re-verified while all others are skipped (not
+  re-testbenched). Streams an `editPlan` event and returns the updated `spec`.
 - `POST /flow/stop` {threadId} → cooperative cancel. `POST /flow/decision` {threadId,
   choice} → resolve a mid-build budget decision (continue|buildOnly|raiseCutoff).
 - `POST /refix` {spec,manifest,review,...} → rewrite review-flagged modules, re-verify.

@@ -1859,6 +1859,17 @@
         return;
     }
 
+    // FOLLOW-UP EDIT: if this project already has a built design (a spec + at least
+    // one module), apply the change directly — NO spec-approval popup — and rebuild /
+    // re-testbench only the modules the change affects (see runEditFlow + backend
+    // /flow/continue editRequest). A fresh/empty project falls through to the full flow.
+    var existingSpec = designSpecText();
+    var existingModules = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
+    if (currentProjectId != null && existingSpec && existingModules.length) {
+      await runEditFlow(bubble, fullPrompt, provider, key, model);
+      return;
+    }
+
     var ok = await ensureProject(fullPrompt, imgs);
     if (!ok) {
         chatSend.disabled = false;
@@ -2012,6 +2023,46 @@
     }
   }
 
+  // Follow-up edit to an existing project: no approval popup. Sends the change request
+  // + current spec + current files to /flow/continue with editRequest; the backend
+  // updates the spec and rebuilds/re-testbenches ONLY the affected modules, keeping the
+  // rest. Saves the returned (updated) spec back to spec.md via finishFlowBuild.
+  async function runEditFlow(bubble, editText, provider, key, model) {
+    var base = getBackendUrl();
+    var spec = designSpecText();
+    var vfiles = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })
+      .map(function (f) { return { name: f.name, code: f.code || "" }; });
+    var tid = genUUID(); activeBuildThreadId = tid;
+    bubble.textContent = "✏️ Applying your change — updating the spec and rebuilding only the affected modules…";
+    showStopButton();
+    try {
+      var resp = await fetch(base + "/flow/continue", {
+        method: "POST",
+        credentials: "include",
+        headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
+        body: JSON.stringify({ threadId: tid, spec: spec, files: vfiles, editRequest: editText,
+          provider: provider, key: key, builderModel: model, verifierModel: model }),
+      });
+      var data = await readFlowStream(resp);
+      activeBuildThreadId = null; removeBuildControls();
+      if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
+      if (!data || data.error) {
+        bubble.textContent = "⚠ " + ((data && data.error) || "edit failed");
+        bubble.classList.add("chat-error");
+        if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
+        return;
+      }
+      if (data.spec) lastFlowSpec = data.spec; // finishFlowBuild saves this to spec.md
+      await finishFlowBuild(data);
+      refreshCredits();
+    } catch (e) {
+      bubble.textContent = "⚠ edit error: " + ((e && e.message) || e);
+      bubble.classList.add("chat-error");
+    } finally {
+      activeBuildThreadId = null; removeBuildControls(); chatSend.disabled = false;
+    }
+  }
+
   async function flowDecision(approved, changes) {
 
     var base = getBackendUrl();
@@ -2077,7 +2128,11 @@
   // Log a single build event live (used as the NDJSON stream arrives).
   function logBuildEvent(ev) {
     if (!ev) return;
-    if (ev.type === "plan") {
+    if (ev.type === "editPlan") {
+      consoleLog((ev.changed && ev.changed.length)
+        ? "✏️ edit: rebuilding only " + ev.changed.join(", ") + " (other modules kept)"
+        : "✏️ edit: spec updated — no module changes needed", "info");
+    } else if (ev.type === "plan") {
       consoleLog("📋 plan: " + (ev.order || []).join(" → "), "info");
       if (ev.cycle && ev.cycle.length) consoleLog("⚠ dependency cycle: " + ev.cycle.join(", "), "error");
     } else if (ev.type === "building") {

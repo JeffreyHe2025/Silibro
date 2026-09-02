@@ -15,7 +15,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
-const { buildDesign, refixFromReview, generateProjectTestbench, repairProjectTestbench } = require("./build");
+const { buildDesign, refixFromReview, planEdit, generateProjectTestbench, repairProjectTestbench } = require("./build");
 const { compileVerilog, compileReport, runTestbench, synthesizeProject } = require("./compile");
 const { startFlow, resumeFlow, resolveDecision, requestStop, isStopped } = require("./flow");
 const { runWithUsage, callLLM } = require("./llm");
@@ -599,8 +599,13 @@ app.post("/flow/stop", (req, res) => {
 // Runs the build seeded with the files already built, skipping done modules and
 // building the rest. Streams NDJSON like /flow/approve.
 //   body: { spec, files:[{name,code}], provider, key?, verifierModel?, builderModel?, model?, threadId? }
+// Continue/resume a build from existing files (no spec re-approval). Two uses:
+//  - resume a stopped build: seeds files, skips done modules, builds the rest.
+//  - FOLLOW-UP EDIT (editRequest present): the Verifier merges the request into the
+//    spec and lists only the changed/new modules; we rebuild + re-testbench ONLY
+//    those (everything else is kept, not re-verified). Returns the updated spec.
 app.post("/flow/continue", async (req, res) => {
-  const { spec, files, provider, key, verifierModel, builderModel, model, threadId } = req.body || {};
+  const { spec, files, provider, key, verifierModel, builderModel, model, threadId, editRequest } = req.body || {};
   if (!spec || !provider || (provider !== "bedrock" && !key)) {
     return res.status(400).json({ error: "spec, provider (and key for BYOK) are required" });
   }
@@ -619,11 +624,24 @@ app.post("/flow/continue", async (req, res) => {
     const builder = { provider, key, model: builderModel || model };
     const verifier = { provider, key, model: verifierModel || builderModel || model };
     const seedFiles = (files || []).filter((f) => f && /\.s?v$/i.test(f.name));
-    const control = { seedFiles, shouldStop: () => isStopped(tid) };
-    const { result: out, balance, anonTokensRemaining } = await runBilled(bill, "flow", () =>
-      buildDesign(builder, spec, (ev) => send({ type: "progress", event: ev }), verifier, null, control)
-    );
-    send({ threadId: tid, done: true, ...out, balance, anonTokensRemaining });
+
+    // Follow-up edit: plan the minimal change (no approval popup) and force-rebuild
+    // only the modules it touches. Runs entirely on the metered work path.
+    let effSpec = spec;
+    const { result: out, balance, anonTokensRemaining } = await runBilled(bill, "flow", async () => {
+      let forceRebuild = null;
+      if (editRequest && String(editRequest).trim()) {
+        const filesText = seedFiles.map((f) => "--- " + f.name + " ---\n" + (f.code || "")).join("\n\n");
+        const plan = await planEdit(verifier, spec, filesText, String(editRequest));
+        effSpec = plan.spec || spec;
+        forceRebuild = plan.changed || [];
+        send({ type: "progress", event: { type: "editPlan", changed: forceRebuild } });
+      }
+      const control = { seedFiles, shouldStop: () => isStopped(tid), forceRebuild: forceRebuild || undefined };
+      return buildDesign(builder, effSpec, (ev) => send({ type: "progress", event: ev }), verifier, null, control);
+    });
+    // Return the (possibly updated) spec so the client can save spec.md.
+    send({ threadId: tid, done: true, ...out, spec: effSpec, balance, anonTokensRemaining });
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }

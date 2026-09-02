@@ -105,6 +105,34 @@ async function planGraph(llm, spec) {
     .filter((m) => m.name);
 }
 
+// Follow-up EDIT planning: given the current spec, the existing module code, and a
+// change request, return the UPDATED spec plus the set of modules that must be rebuilt
+// (edited existing ones + any new ones). Modules NOT listed are kept as-is and are not
+// re-testbenched. Used by the /flow/continue edit path so a small change doesn't rerun
+// the whole design or re-verify untouched modules.
+async function planEdit(llm, spec, filesText, request) {
+  const sys =
+    "You are updating an EXISTING Verilog design in response to a change request. You are given the current " +
+    "design spec (organized as '## <module>' sections) and the current module code. Apply the change to the " +
+    "spec and identify the MINIMAL set of modules that must be rebuilt.\n" +
+    "Return ONLY JSON, no prose: {\"spec\":\"<the FULL updated spec markdown, same '## <module>' structure>\"," +
+    "\"changed\":[\"<module names to rebuild: existing modules whose behavior/interface the change affects, " +
+    "PLUS any brand-new modules>\"]}.\n" +
+    "Rules: keep every unaffected module's spec section byte-for-byte the same; only change the sections that " +
+    "the request actually touches. 'changed' must list exactly those touched/new modules and nothing else. " +
+    "If the request is not a hardware change, return {\"spec\":\"" + "\",\"changed\":[]}.";
+  const user =
+    "=== CURRENT SPEC ===\n" + spec + "\n\n=== CURRENT MODULE CODE ===\n" + (filesText || "(none)") +
+    "\n\n=== CHANGE REQUEST ===\n" + request;
+  const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+  const s = reply.replace(/```json|```/g, "");
+  let obj;
+  try { obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1)); } catch (e) { obj = {}; }
+  const newSpec = (obj && typeof obj.spec === "string" && obj.spec.trim()) ? obj.spec : spec;
+  const changed = Array.isArray(obj && obj.changed) ? obj.changed.map(String).map((x) => x.trim()).filter(Boolean) : [];
+  return { spec: newSpec, changed: changed };
+}
+
 // Render the module manifest as a compact reference block for the LLMs, so they
 // know the whole design and the status of every module (built / testbenched).
 function manifestReference(manifest) {
@@ -1073,6 +1101,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
   control = control || {};
   const shouldStop = control.shouldStop || function () { return false; }; // cooperative cancel
   const seedFiles = control.seedFiles || null; // resume: modules already built (name.v -> code)
+  // Follow-up edits: modules to REBUILD + re-verify even though they're seeded (the
+  // rest of the design is kept and NOT re-testbenched). Names are case-insensitive.
+  const forceSet = new Set((control.forceRebuild || []).map((n) => String(n).toLowerCase()));
   let stopped = false;
   const modules = await planGraph(llm, spec);
   const { order, cycle } = topoSort(modules);
@@ -1134,8 +1165,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
   // Shared state is safe under JS single-threaded async; compiles use isolated temp dirs.
   async function processModule(mod) {
     // Resume: if this module is already built (from seedFiles) and still compiles,
-    // keep it and skip the rebuild + verification entirely.
-    if (seedFiles && builtFiles[mod.name]) {
+    // keep it and skip the rebuild + verification entirely — UNLESS this follow-up
+    // edit marked it for rebuild (forceSet). New modules aren't seeded, so they build.
+    if (seedFiles && builtFiles[mod.name] && !forceSet.has(mod.name.toLowerCase())) {
       const chk = await compileVerilog(Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] })), mod.name);
       if (chk.ok) {
         const e0 = manifestByName[mod.name]; if (e0) e0.built = true;
@@ -1482,4 +1514,4 @@ async function repairProjectTestbench(llm, spec, files, prevCode, compileError) 
   return { name: "project_tb.v", code: code, top: tbTopName(code, "") };
 }
 
-module.exports = { buildDesign, refixFromReview, planGraph, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };
+module.exports = { buildDesign, refixFromReview, planGraph, planEdit, topoSort, buildModule, summarizeModule, computeFeatures, baselineScore, generateProjectTestbench, repairProjectTestbench };
