@@ -1470,3 +1470,18 @@ body.console-resizing, body.console-resizing * {
 
 /* Top button greys out when there is no dependency_graph.md */
 #detect-top:disabled { opacity: .4; cursor: default; }
+
+/* Undo-delete snackbar: bottom-left toast with a 6s "click to undo" grace period */
+.undo-toast {
+  position: fixed; left: 20px; bottom: 20px; z-index: 4000;
+  display: flex; align-items: center; gap: 12px;
+  background: #1f2937; color: #fff;
+  border: 1px solid rgba(255,255,255,.15); border-radius: 10px;
+  padding: 12px 16px; font-size: 14px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); cursor: pointer;
+  opacity: 0; transform: translateY(8px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.undo-toast.show { opacity: 1; transform: translateY(0); }
+.undo-toast:hover { background: #374151; }
+.undo-toast-action { color: #93c5fd; font-weight: 600; text-decoration: underline; }

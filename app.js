@@ -724,20 +724,78 @@
     });
   });
 
+  // Snackbar-style undo delete: clicking the trash removes the project from the list
+  // right away and shows a 6-second "click to undo" toast at the bottom-left. The real
+  // DB delete is DEFERRED until the toast expires, so undo just cancels it — no blocking
+  // confirm() dialog, no data lost if it was a misclick.
+  var pendingProjectDelete = null;        // { id, project, index, timer }
+  var deleteToastEl = null;
+
+  function restoreProjectToList(project, index) {
+    if (!project || projects.some(function (p) { return p.id === project.id; })) return;
+    var i = (index >= 0 && index <= projects.length) ? index : projects.length;
+    projects.splice(i, 0, project);
+    renderProjectList();
+  }
+  function hideDeleteToast() {
+    if (deleteToastEl) { deleteToastEl.remove(); deleteToastEl = null; }
+  }
+  function commitPendingProjectDelete() {
+    if (!pendingProjectDelete) return;
+    var pd = pendingProjectDelete;
+    pendingProjectDelete = null;
+    if (pd.timer) clearTimeout(pd.timer);
+    hideDeleteToast();
+    dbDeleteProject(pd.id).then(function (res) {
+      if (res && res.error) { // server refused → put it back so nothing is silently lost
+        restoreProjectToList(pd.project, pd.index);
+        alert("Could not delete project: " + res.error.message);
+      }
+    });
+  }
+  function undoPendingProjectDelete() {
+    if (!pendingProjectDelete) return;
+    var pd = pendingProjectDelete;
+    pendingProjectDelete = null;
+    if (pd.timer) clearTimeout(pd.timer);
+    hideDeleteToast();
+    restoreProjectToList(pd.project, pd.index);
+    openProject(pd.id); // reopen it, restoring the previous view
+  }
+  function showDeleteToast(onUndo) {
+    hideDeleteToast();
+    var t = document.createElement("div");
+    t.className = "undo-toast";
+    t.setAttribute("role", "status");
+    t.innerHTML = '<span class="undo-toast-msg">🗑 Deleting project…</span>' +
+      '<span class="undo-toast-action">click to undo</span>';
+    t.addEventListener("click", onUndo);
+    document.body.appendChild(t);
+    void t.offsetWidth;          // reflow so the fade-in transition runs
+    t.classList.add("show");
+    deleteToastEl = t;
+  }
+
   deleteProjectBtn.addEventListener("click", function () {
     if (currentProjectId == null) return;
-    if (!confirm("Delete this project and ALL its files? This cannot be undone.")) return;
+    // If another delete is still pending, commit it first so we don't lose track of it.
+    if (pendingProjectDelete) commitPendingProjectDelete();
     var id = currentProjectId;
-    dbDeleteProject(id).then(function (res) {
-      if (res.error) { alert("Could not delete project: " + res.error.message); return; }
-      projects = projects.filter(function (p) { return p.id !== id; });
-      currentProjectId = null;
-      currentFileId = null;
-      files = [];
-      filesSection.classList.add("hidden");
-      closeEditorPanel();
-      renderProjectList();
-    });
+    var index = projects.findIndex(function (p) { return p.id === id; });
+    var project = index >= 0 ? projects[index] : null;
+    if (!project) return;
+    // Optimistically remove from the list + clear the current view.
+    projects = projects.filter(function (p) { return p.id !== id; });
+    currentProjectId = null;
+    currentFileId = null;
+    files = [];
+    filesSection.classList.add("hidden");
+    closeEditorPanel();
+    renderProjectList();
+    // Defer the real delete 6s; the toast (click = undo) cancels it.
+    pendingProjectDelete = { id: id, project: project, index: index, timer: null };
+    pendingProjectDelete.timer = setTimeout(commitPendingProjectDelete, 6000);
+    showDeleteToast(undoPendingProjectDelete);
   });
 
   // ---------------------------------------------------------------------------
