@@ -743,6 +743,26 @@ function hasAsyncReset(code) {
   return /@\s*\(\s*(?:pos|neg)edge\s+\w+\s*(?:or|,)\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*/i.test(c) ||
          /@\s*\(\s*(?:pos|neg)edge\s+\w*(?:rst|reset)\w*\s*(?:or|,)\s*(?:pos|neg)edge/i.test(c);
 }
+
+// Does the spec REQUIRE a synchronous reset? The contract's LLM classification wins;
+// otherwise read the spec text. Crucially it recognizes BEHAVIORAL descriptions of a
+// sync reset ("on the positive edge of clk, when rst_n is low, …") that never use the
+// word "synchronous" — that phrasing was slipping through and leaving an async reset in
+// place. Returns true (sync), false (async / explicitly not sync), or null (unclear).
+function specWantsSyncReset(specText, contract) {
+  if (contract && contract.reset && /^sync/i.test(contract.reset.type || "")) return true;
+  if (contract && contract.reset && /^async/i.test(contract.reset.type || "")) return false;
+  const s = String(specText || "");
+  if (/\basynchronous\b/i.test(s)) return false;      // explicitly async → don't touch
+  if (/\bsynchronous\b/i.test(s)) return true;        // explicitly sync
+  // Behavioral: a reset that takes effect ON a clock edge is synchronous. Look for a
+  // reset word near a clock-edge phrase, with no "regardless of clock"/"immediately".
+  const hasReset = /\b(reset|rst_n|rstn|rst)\b/i.test(s);
+  const onClockEdge = /\b(pos|neg|rising|falling)\s*edge\b|\bedge of\b|\bposedge\b|\bnegedge\b|\bon (the )?(rising|falling|clock|clk)\b/i.test(s);
+  const asyncHint = /\b(immediately|regardless of (the )?clock|independent of (the )?clock|at any time|asynchronously)\b/i.test(s);
+  if (hasReset && onClockEdge && !asyncHint) return true;
+  return null; // unclear
+}
 // Deterministically classify a module's reset from its CODE (not the LLM summary):
 // asynchronous = a reset edge in the sensitivity list; synchronous = a reset checked
 // inside a clocked block; null = none/unclear (then keep the summary's value).
@@ -1346,9 +1366,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       // sensitivity list in code — before any conformance LLM call sees it.
       // Requirement is read from BOTH the contract AND the spec text (\bsynchronous\b
       // doesn't match "asynchronous"), so it works even if the LLM contract omits reset.
-      const wantsSyncReset =
-        (contract && contract.reset && /^sync/i.test(contract.reset.type || "")) ||
-        /\bsynchronous\b/i.test(builderSpec(spec, mod.name));
+      const wantsSyncReset = specWantsSyncReset(builderSpec(spec, mod.name), contract) === true;
       if (wantsSyncReset && hasAsyncReset(r.code)) {
         const fixedCode = stripAsyncReset(r.code);
         if (fixedCode !== r.code) {
