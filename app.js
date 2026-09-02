@@ -1787,6 +1787,61 @@
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
+    // FOLLOW-UP ON AN EXISTING DESIGN → classify BEFORE the generic project router.
+    // A short follow-up like "change it to divide by 3, not 5" doesn't look like a
+    // build request to the router and would be wrongly bounced by the hardware topic
+    // gate below; the existing project context makes the intent clear, so resolve it
+    // here first. EDIT → apply in place (no approval popup, rebuild only affected
+    // modules). NEW → open a fresh chat + project, then fall through to the full flow.
+    // CHAT → answer as a question about the design (no rebuild, not blocked by the gate).
+    if (currentProjectId != null && designSpecText() &&
+        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
+      var exMods = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
+      var intent = "EDIT"; // default: never silently discard their work
+      if (!imgs.length) {
+        try {
+          var modList = exMods.map(function (f) { return f.name; }).join(", ");
+          var sysEdit = "The user already has a Verilog project (modules: " + modList + ").\n" +
+            "Current design spec:\n" + String(designSpecText()).slice(0, 1500) + "\n\n" +
+            "Classify the user's new message:\n" +
+            "- EDIT: asks to modify, fix, change, or extend THIS existing design.\n" +
+            "- NEW: asks to build a DIFFERENT, unrelated hardware design from scratch.\n" +
+            "- CHAT: a question, explanation, or comment that does NOT ask to change the design.\n" +
+            "Reply with only one word: EDIT, NEW, or CHAT.";
+          var eRes = await callLLM(provider, key, model, sysEdit, [{ role: "user", content: promptText }]);
+          if (/^\s*new\b/i.test(eRes || "")) intent = "NEW";
+          else if (/^\s*chat\b/i.test(eRes || "")) intent = "CHAT";
+        } catch (e) { /* on failure, keep the safe default (EDIT) */ }
+      }
+      if (intent === "EDIT") {
+        await runEditFlow(bubble, fullPrompt, provider, key, model);
+        return;
+      }
+      if (intent === "CHAT") {
+        try {
+          var sysC = buildProjectContext();
+          var replyC = await callLLM(provider, key, model, sysC, chatHistory);
+          var dispC = stripFileBlocks(replyC);
+          bubble.textContent = dispC;
+          chatHistory.push({ role: "assistant", content: dispC });
+        } catch (err) {
+          bubble.textContent = "Error: " + (err.message || err);
+          bubble.classList.add("chat-error");
+        } finally {
+          chatSend.disabled = false;
+          chatConversation.scrollTop = chatConversation.scrollHeight;
+          try { await saveConversation(); } catch (e) {}
+        }
+        return;
+      }
+      // NEW → open a fresh chat + deselect the current project, then fall through to
+      // the full build flow (ensureProject creates a new project below).
+      startNewProjectContext();
+      appendChatMsg("user", displayUserMsg, imgs);
+      chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
+      bubble = appendChatMsg("assistant", "🆕 New project — writing a fresh spec…");
+    }
+
     // Check if it's a project request
     var isProject = true;
     if (!imgs.length) {
@@ -1857,37 +1912,6 @@
             try { await saveConversation(); } catch (e) {}
         }
         return;
-    }
-
-    // EXISTING DESIGN → classify EDIT vs NEW PROJECT. If the project already has a
-    // design (spec + a module), ask whether the new prompt modifies THIS design or
-    // asks for a different/new one. EDIT → apply in place (no approval popup, rebuild
-    // only affected modules). NEW → open a fresh chat + new project, then run the full
-    // Verifier→approval→Builder flow. Fresh/empty projects fall straight through.
-    var existingSpec = designSpecText();
-    var existingModules = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
-    if (currentProjectId != null && existingSpec && existingModules.length) {
-      var editIntent = true; // default to EDIT — never silently discard their work
-      if (!imgs.length) {
-        try {
-          var moduleList = existingModules.map(function (f) { return f.name; }).join(", ");
-          var sysEdit = "The user already has a Verilog project (modules: " + moduleList + ").\n" +
-            "Current design spec:\n" + String(existingSpec).slice(0, 1500) + "\n\n" +
-            "Does the user's new message ask to MODIFY or extend THIS design, or to build a DIFFERENT, unrelated NEW design? Reply only EDIT or NEW.";
-          var eRes = await callLLM(provider, key, model, sysEdit, [{ role: "user", content: promptText }]);
-          if (/^\s*new\b/i.test(eRes || "")) editIntent = false;
-        } catch (e) { /* on failure, keep the safe default (edit) */ }
-      }
-      if (editIntent) {
-        await runEditFlow(bubble, fullPrompt, provider, key, model);
-        return;
-      }
-      // NEW project detected: open a fresh chat + deselect the current project, then
-      // fall through to the full build flow (ensureProject creates a new project).
-      startNewProjectContext();
-      appendChatMsg("user", displayUserMsg, imgs);
-      chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
-      bubble = appendChatMsg("assistant", "🆕 New project — writing a fresh spec…");
     }
 
     var ok = await ensureProject(fullPrompt, imgs);
