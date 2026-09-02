@@ -679,7 +679,7 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
     "(5) on a mismatch, print a line starting with 'FUNC_FAIL' including inputs, expected, and actual; " +
     "(6) at the very end, print 'FUNC_PASS' only if every check passed; (7) call $finish. " +
     "Name the testbench module 'tb_" + mod.name + "'. Output ONLY the testbench inside a ```verilog code block — " +
-    "no prose, and do NOT include the module under test.";
+    "no prose, and do NOT include the module under test." + IVERILOG_RULES;
   const user =
     "Module under test: " + mod.name + "\n" +
     "Ports: " + JSON.stringify(ports) + "\n" +
@@ -835,7 +835,7 @@ async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, comp
     "oracle: instantiate the module by its EXACT name and port names, generate a clock + reset if sequential, " +
     "compute expected outputs from the spec, and print 'FUNC_FAIL' on a mismatch and 'FUNC_PASS' only if all " +
     "checks pass, then $finish. Do NOT modify or redefine the module under test. Name the testbench 'tb_" +
-    mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no prose, no module under test.";
+    mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no prose, no module under test." + IVERILOG_RULES;
   const user =
     "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
     "\n\nThe iverilog COMPILE ERROR from your testbench:\n" + String(compileError || "").slice(0, 800) +
