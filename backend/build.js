@@ -982,6 +982,12 @@ async function localizeAndFix(llm, vllm, spec, entry, builtFiles, modByName, onP
   const maxRounds = 3;
   for (let round = 1; round <= maxRounds; round++) {
     chargeBudget(budget);
+    // Announce BEFORE the call: writing + running the oracle testbench is the slowest
+    // step (a big Verifier LLM generation) and emits nothing while it runs, so without
+    // this the console looks frozen between "smoke baseline" and "coverage".
+    emit({ module: entry.name, msg: round === 1
+      ? "writing & running the functional oracle testbench (this is the slow step)…"
+      : "re-running the oracle testbench (round " + round + ")…" });
     const res = await funcTest(vllm, spec, entry, builtFiles); // Verifier's oracle
     entry.funcTbPassed = res.passed;
     entry.funcTbOutput = res.details;
