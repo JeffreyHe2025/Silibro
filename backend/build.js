@@ -72,6 +72,19 @@ function topoSort(modules) {
   return { order, cycle: remaining }; // cycle = modules that couldn't be ordered
 }
 
+// Coerce an LLM-proposed module name into a LEGAL Verilog identifier: keep letters,
+// digits and underscore; collapse every run of anything else (spaces, punctuation)
+// into a single underscore; prefix "m_" if it would start with a digit. Without this
+// a spec heading like "## Frequency Divider Module" becomes the module name and the
+// Builder writes `module Frequency Divider Module(...)` — a line-1 syntax error that
+// no retry can fix. Applied consistently to names AND dependsOn so edges still line up.
+function sanitizeModuleName(name) {
+  let s = String(name || "").trim().replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!s) return "m";
+  if (/^[0-9]/.test(s)) s = "m_" + s;
+  return s;
+}
+
 // Step 1: LLM decomposes the spec into modules + dependencies.
 async function planGraph(llm, spec) {
   const sys =
@@ -97,12 +110,12 @@ async function planGraph(llm, spec) {
   const s = reply.replace(/```json|```/g, "");
   const obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
   return (obj.modules || [])
+    .filter((m) => m && String(m.name || "").trim())
     .map((m) => ({
-      name: String((m && m.name) || "").trim(),
-      purpose: String((m && m.purpose) || ""),
-      dependsOn: Array.isArray(m && m.dependsOn) ? m.dependsOn.map(String) : [],
-    }))
-    .filter((m) => m.name);
+      name: sanitizeModuleName(m.name), // legal Verilog identifier (no spaces/punct)
+      purpose: String(m.purpose || ""),
+      dependsOn: Array.isArray(m.dependsOn) ? m.dependsOn.map(sanitizeModuleName) : [],
+    }));
 }
 
 // Follow-up EDIT planning: given the current spec, the existing module code, and a
@@ -129,7 +142,8 @@ async function planEdit(llm, spec, filesText, request) {
   let obj;
   try { obj = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1)); } catch (e) { obj = {}; }
   const newSpec = (obj && typeof obj.spec === "string" && obj.spec.trim()) ? obj.spec : spec;
-  const changed = Array.isArray(obj && obj.changed) ? obj.changed.map(String).map((x) => x.trim()).filter(Boolean) : [];
+  // Sanitize to match the identifiers planGraph produces, so forceRebuild matching works.
+  const changed = Array.isArray(obj && obj.changed) ? obj.changed.map(String).map((x) => x.trim()).filter(Boolean).map(sanitizeModuleName) : [];
   return { spec: newSpec, changed: changed };
 }
 
@@ -187,7 +201,12 @@ function builderSpec(spec, name) {
   if (!spec || !name) return spec;
   const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const nameRe = new RegExp("\\b" + esc + "\\b");
-  const modSec = specSection(spec, (t) => nameRe.test(t));
+  // Also match a human-readable heading whose sanitized form equals this (sanitized)
+  // module name — e.g. name "Frequency_Divider_Module" ↔ heading "Frequency Divider
+  // Module" — so the per-module spec slice still works after name sanitization.
+  const norm = (t) => String(t).replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  const wantNorm = norm(name);
+  const modSec = specSection(spec, (t) => nameRe.test(t) || norm(t) === wantNorm);
   if (!modSec) return spec; // couldn't isolate this module -> send the whole spec
   const title = (String(spec).match(/^#\s+.*$/m) || [""])[0];
   const overview = specSection(spec, (t) => /^overview$/i.test(t.trim()));
