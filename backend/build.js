@@ -354,7 +354,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "the sensitivity list (e.g. 'always @(posedge clk or negedge rst_n)'). Match active-high vs active-low.\n" +
       "- The behavior, parameters, and edge cases the spec describes for THIS module.\n" +
       "Re-read this module's section of the spec, then implement it precisely. Output ONLY the module inside a " +
-      "```verilog code block — no prose, no testbench.")) + RESET_REF +
+      "```verilog code block — no prose, no testbench.")) + RESET_REF + IVERILOG_RULES +
       // Ask for the module's summary in the SAME response, so we don't spend a second
       // call re-reading the code. The ```verilog block comes first; a ```json summary
       // follows. If it's missing/unparseable, the caller falls back to summarizeModule.
@@ -531,15 +531,26 @@ const RESET_REF =
   "    end\n" +
   "  WRONG: writing 'always @(posedge clk or negedge rst_n)' when the spec asks for a SYNCHRONOUS reset. " +
   "Do NOT default to asynchronous \u2014 use exactly the reset TYPE the spec states, and match active-low " +
-  "(rst_n / !rst_n) vs active-high polarity.\n\n" +
-  "FSM STATE ENCODING \u2014 Icarus Verilog is STRICT about SystemVerilog enums and will reject " +
-  "'This assignment requires an explicit cast'. Do NOT use 'typedef enum' for states. Encode states with " +
-  "localparam constants and a PLAIN register instead:\n" +
-  "    localparam [2:0] IDLE = 3'd0, S1 = 3'd1, S2 = 3'd2;\n" +
-  "    logic [2:0] state, next_state;\n" +
-  "    always @(posedge clk) state <= next_state;   // plain assignments, no cast needed\n" +
-  "This avoids all enum-cast errors. If you MUST use an enum, every assignment of a non-enum value has to be " +
-  "cast explicitly, e.g. next_state = state_t'(expr).";
+  "(rst_n / !rst_n) vs active-high polarity.";
+
+// Coding rules that keep the output inside the subset Icarus Verilog (iverilog -g2012)
+// actually accepts. iverilog is STRICTER than most simulators, so code that passes
+// elsewhere can fail here \u2014 these are the recurring first-attempt compile errors.
+// Appended to every prompt where the Builder writes/fixes a module.
+const IVERILOG_RULES =
+  "\n\nWRITE FOR ICARUS VERILOG (iverilog -g2012) \u2014 it is strict, so follow these to compile on the FIRST try:\n" +
+  "- FSM STATE: use `localparam` constants + a plain `logic [N:0] state, next_state;` register. Do NOT use " +
+  "`typedef enum` \u2014 iverilog demands an explicit cast on EVERY enum assignment ('This assignment requires an " +
+  "explicit cast'). Example: `localparam [2:0] IDLE=3'd0, S1=3'd1; logic [2:0] state, next_state; " +
+  "always @(posedge clk) state <= next_state;` \u2014 plain assignments, no casts.\n" +
+  "- Do NOT use packed `struct`/`union` ports, `interface`, `class`, `program`, or `package` \u2014 iverilog's " +
+  "support is incomplete. Cross module boundaries with plain vectors (`logic [W-1:0]`).\n" +
+  "- Every combinational block (`always @(*)` / `always_comb`) must assign each output on EVERY path \u2014 set " +
+  "defaults at the top \u2014 so no latch is inferred.\n" +
+  "- Use plain `case` \u2026 `default`; avoid the `unique`/`priority` case qualifiers.\n" +
+  "- Size every literal to its signal width (`8'd0`, `4'b0000`, not a bare `0`), and drive each signal from " +
+  "exactly ONE always block or ONE continuous `assign`.\n" +
+  "- Declare every signal before use \u2014 no undeclared identifiers, no implicit nets, no SystemVerilog casts.";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
@@ -759,7 +770,7 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
   const sys =
     "You are a Verilog module writer. A module you wrote VIOLATES the design specification. " +
     "Rewrite ONLY the module '" + mod.name + "' to fix the violation(s), matching the spec's required " +
-    "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench." + RESET_REF;
+    "ports and clock/reset style exactly. Output ONLY that module inside a ```verilog code block — no prose, no testbench." + RESET_REF + IVERILOG_RULES;
   let base =
     "Design spec:\n" + builderSpec(spec, mod.name) +
     "\n\nModule '" + mod.name + "' — " + (mod.purpose || "") +
