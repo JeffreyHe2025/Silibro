@@ -237,18 +237,26 @@ async function genInterfaceContract(llm, spec, mod) {
     const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
     const t = reply.replace(/```json|```/g, "");
     const obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1));
-    const ports = Array.isArray(obj.ports) ? obj.ports.filter((p) => p && p.name) : [];
-    const parameters = Array.isArray(obj.parameters) ? obj.parameters.filter((p) => p && p.name) : [];
+    const ports = Array.isArray(obj.ports) ? obj.ports.filter((p) => p && p.name && !isSentinel(p.name)) : [];
+    const parameters = Array.isArray(obj.parameters) ? obj.parameters.filter((p) => p && p.name && !isSentinel(p.name)) : [];
     const reset = obj.reset && typeof obj.reset === "object" ? obj.reset : null;
     return { parameters, ports, reset }; // reset kept even when there are no ports
   } catch (e) { return null; }
+}
+
+// Sentinel words an LLM uses for "nothing here" — must never become Verilog. Left
+// alone they leak in as a param named `none`, a default of `none`, or a port width
+// "[none-1:0]" that references an undeclared parameter → iverilog "Unable to bind
+// parameter `none'". Treated as absent everywhere below.
+function isSentinel(s) {
+  return /^(none|n\/?a|null|nil|undefined|unused|-{1,}|x)$/i.test(String(s == null ? "" : s).trim());
 }
 
 // Normalize a width spec into Verilog range syntax ("" for 1 bit).
 function normWidth(w) {
   if (w == null) return "";
   w = String(w).trim();
-  if (!w || w === "1") return "";
+  if (!w || w === "1" || isSentinel(w)) return "";  // absent / sentinel -> single bit
   if (/^\[.*\]$/.test(w)) return w;                 // already [MSB:LSB]
   if (/^\d+$/.test(w)) { const n = parseInt(w, 10); return n > 1 ? "[" + (n - 1) + ":0]" : ""; }
   if (/^[A-Za-z_]\w*$/.test(w)) return "[" + w + "-1:0]"; // a parameter name
@@ -261,15 +269,16 @@ function buildHeader(name, contract) {
   const ID = /^[A-Za-z_]\w*$/; // a valid Verilog identifier
   // Drop any malformed ports/params (a bad LLM contract can omit a name -> the JS
   // `undefined` would stringify into "undefined" and produce invalid Verilog).
-  const ports = contract.ports.filter((p) => p && ID.test(String(p.name || "")));
+  const ports = contract.ports.filter((p) => p && ID.test(String(p.name || "")) && !isSentinel(p.name));
   if (!ports.length) return null; // nothing usable -> let the Builder write the whole module
   let h = "module " + name;
-  const params = (contract.parameters || []).filter((p) => p && ID.test(String(p.name || "")));
+  const params = (contract.parameters || []).filter((p) => p && ID.test(String(p.name || "")) && !isSentinel(p.name));
   if (params.length) {
     h += " #(\n" + params.map((p) => {
       let d = (p.default != null && String(p.default).trim() !== "") ? String(p.default).trim() : "1";
-      // default must look like a simple constant expression; otherwise fall back to 1
-      if (!/^[\w'\-+*/()\s.]+$/.test(d) || /undefined|NaN|\[object/i.test(d)) d = "1";
+      // default must look like a simple constant expression (and not a sentinel word);
+      // otherwise fall back to 1 so it can't reference an undeclared parameter.
+      if (!/^[\w'\-+*/()\s.]+$/.test(d) || /undefined|NaN|\[object/i.test(d) || isSentinel(d)) d = "1";
       return "  parameter " + p.name + " = " + d;
     }).join(",\n") + "\n)";
   }
