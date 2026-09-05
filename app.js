@@ -2247,9 +2247,10 @@
     } else if (ev.type === "attempt") {
       if (ev.ok) {
         consoleLog("✓ " + ev.module + " compiled (attempt " + ev.attempt + ")", "ok");
+        resolveRetryLines(ev.module); // recolor this module's earlier orange retries green
       } else if (ev.attempt < ev.maxTries) {
         consoleLog("↻ " + ev.module + " attempt " + ev.attempt + "/" + ev.maxTries +
-          " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn");
+          " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn", "retry:" + ev.module);
       }
       // final-attempt failure is reported by the 'built' event below
     } else if (ev.type === "coverageStart") {
@@ -2607,14 +2608,29 @@
   document.addEventListener("click", function () { moreMenu.classList.add("hidden"); });
 
   // ---- Activity console (bottom-left): logs runs by the user and the AI ----
-  function consoleLog(text, kind) {
+  function consoleLog(text, kind, tag) {
     var line = document.createElement("div");
     line.className = "console-line" + (kind ? " " + kind : "");
+    if (tag) line.dataset.tag = tag; // so later events can find & recolor this line
     line.textContent = text;
     consoleBody.appendChild(line);
     consoleBody.scrollTop = consoleBody.scrollHeight;
     consolePanel.classList.remove("hidden"); // pop up on activity
     consoleToggle.classList.add("hidden");
+  }
+
+  // Turn a module's orange compile-retry lines GREEN once it finally compiles, so a
+  // build that self-heals visibly resolves instead of leaving orange warnings behind.
+  function resolveRetryLines(module) {
+    var tag = "retry:" + module;
+    var lines = consoleBody.querySelectorAll(".console-line");
+    for (var i = 0; i < lines.length; i++) {
+      var el = lines[i];
+      if (el.dataset && el.dataset.tag === tag && !el.classList.contains("resolved")) {
+        el.classList.remove("warn");
+        el.classList.add("ok", "resolved");
+      }
+    }
   }
   consoleToggle.addEventListener("click", function () {
     consolePanel.classList.remove("hidden");
