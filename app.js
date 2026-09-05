@@ -1898,11 +1898,21 @@
         return;
       }
       // NEW → this chat belongs to the current project; a new design needs its own chat.
-      // Warn instead of building, so we don't overwrite this project or mix two designs.
-      bubble.textContent = "🆕 That sounds like a NEW design. Each chat works on one project, so this chat stays " +
-        "with \"" + (projectNameInput.value || "the current project") + "\". Click ✎ (New chat) at the top of the " +
-        "chat panel to start a fresh chat, then describe your new design there and I'll build it.";
+      // Offer a one-click button that starts a fresh chat (deselecting the project) so the
+      // user doesn't have to do it manually — no overwriting or mixing two designs.
+      bubble.textContent = "🆕 This sounds like a new project. Each chat works on only one project.";
       chatHistory.push({ role: "assistant", content: bubble.textContent });
+      var ncWrap = document.createElement("div");
+      ncWrap.className = "chat-msg assistant build-controls";
+      var ncBtn = document.createElement("button");
+      ncBtn.className = "btn";
+      ncBtn.textContent = "✎ Start new chat";
+      ncBtn.addEventListener("click", function () {
+        if (ncWrap.parentNode) ncWrap.parentNode.removeChild(ncWrap);
+        startNewProjectContext(); // deselect the project + open a fresh chat for the new design
+      });
+      ncWrap.appendChild(ncBtn);
+      chatConversation.appendChild(ncWrap);
       chatSend.disabled = false;
       chatConversation.scrollTop = chatConversation.scrollHeight;
       try { await saveConversation(); } catch (e) {}
