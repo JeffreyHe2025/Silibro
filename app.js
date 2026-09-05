@@ -1841,7 +1841,7 @@
     var displayUserMsg = promptText + (attachedNames.length ? "\n\n📎 " + attachedNames.join(", ") : "");
     // Keep the running context bounded: if the chat has grown very long, summarize
     // the earlier turns and continue in a fresh session (context preserved, not lost).
-    try { await maybeSummarizeContext(provider, key, model); } catch (e) {}
+    try { await maybeCompactContext(provider, key, model); } catch (e) {}
 
     appendChatMsg("user", displayUserMsg, imgs);
     chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
@@ -1882,7 +1882,7 @@
       }
       if (intent === "CHAT") {
         try {
-          var sysC = buildProjectContext();
+          var sysC = memoryContext(promptText) + buildProjectContext();
           var replyC = await callLLM(provider, key, model, sysC, chatHistory);
           var dispC = stripFileBlocks(replyC);
           bubble.textContent = dispC;
@@ -1957,7 +1957,7 @@
         }
         // Fallback to normal chatbot behavior
         try {
-            var sys = buildProjectContext();
+            var sys = memoryContext(promptText) + buildProjectContext();
             var reply = await callLLM(provider, key, model, sys, chatHistory);
             var displayReply = stripFileBlocks(reply);
             bubble.textContent = displayReply;
@@ -2996,7 +2996,15 @@
   });
 
   // ---- AI chat widget (BYOK: OpenRouter, or a direct provider key) ----
-  var chatHistory = []; // [{role, content, images?}] of the OPEN conversation
+  var chatHistory = []; // [{role, content, images?}] RECENT turns of the OPEN conversation
+  // Long-chat memory (persisted with the conversation, kept OUT of chatHistory):
+  //  - convSummary: a running summary of older turns, updated incrementally (we fold in
+  //    only the new turns each time, never re-summarizing the whole thing).
+  //  - convFacts: durable structured key facts (module names, ports, reset style, decisions).
+  //  - convArchive: full text of folded-away turns, kept for lexical retrieval on demand.
+  var convSummary = "";
+  var convFacts = "";
+  var convArchive = []; // [{role, content}]
   var pendingImages = []; // data-URL images attached to the next message
   var currentConversationId = null; // null = unsaved new chat
   var conversations = []; // [{id, title, updated_at}] for the history list
@@ -3407,13 +3415,15 @@
     if (res.error || !res.data) { alert("Couldn't open that chat."); return; }
     currentConversationId = id;
     localStorage.setItem("last_conversation_id", id);
-    chatHistory = Array.isArray(res.data.messages) ? res.data.messages : [];
+    // Restore long-chat memory (summary/facts/archive) + the recent turns.
+    chatHistory = loadPersistedMessages(res.data.messages);
     renderConversation();
     showConversation();
   }
 
   function newChat() {
     chatHistory = [];
+    convSummary = ""; convFacts = ""; convArchive = []; // fresh chat → empty memory
     currentConversationId = null;
     localStorage.removeItem("last_conversation_id");
     chatConversation.innerHTML = "";
@@ -3433,40 +3443,109 @@
     newChat();
   }
 
-  // Rough token estimate = chars / 4. When the conversation exceeds the limit,
-  // summarize the whole transcript and START A NEW SESSION seeded with that
-  // summary — so the model keeps the thread without an ever-growing (costly or
-  // overflowing) history. Signed-in users' prior chat stays saved in History.
-  var CONTEXT_CHAR_LIMIT = 32000; // ~8k tokens
-  async function maybeSummarizeContext(provider, key, model) {
+  // ---- Long-chat memory: incremental summary + key facts + retrieval ---------
+  var CONTEXT_CHAR_LIMIT = 32000; // ~8k tokens of RECENT turns before we compact
+  var KEEP_RECENT = 6;            // turns kept verbatim; older ones fold into the summary
+  var ARCHIVE_MAX = 400;          // cap on archived turns kept for retrieval
+
+  // INCREMENTAL compaction: when the recent window grows past the limit, fold everything
+  // except the last KEEP_RECENT turns into a RUNNING summary + KEY FACTS — feeding the LLM
+  // only the PRIOR summary/facts plus the NEW turns (never the whole transcript), so the
+  // compaction call stays small and fast no matter how long the chat gets. Folded turns
+  // are archived (full text) for later lexical retrieval.
+  async function maybeCompactContext(provider, key, model) {
     var total = 0;
     chatHistory.forEach(function (m) { total += (m && m.content ? String(m.content).length : 0); });
-    if (total < CONTEXT_CHAR_LIMIT || chatHistory.length < 4) return;
+    if (total < CONTEXT_CHAR_LIMIT || chatHistory.length <= KEEP_RECENT + 2) return;
 
-    var transcript = chatHistory.map(function (m) {
+    var foldCount = chatHistory.length - KEEP_RECENT;
+    var toFold = chatHistory.slice(0, foldCount);
+    var transcript = toFold.map(function (m) {
       return (m.role === "user" ? "User: " : "Assistant: ") + (m.content || "");
     }).join("\n");
-    var sys = "You are compacting a Verilog/hardware design chat so it can continue in a new session. " +
-      "Summarize the conversation concisely but PRESERVE all: module names, ports, bit-widths, clock/reset " +
-      "style, design decisions, constraints, file names, and any open questions or next steps. Output only the summary.";
-    var summary;
-    try { summary = await callLLM(provider, key, model, sys, [{ role: "user", content: transcript }]); }
-    catch (e) { return; } // if summarization fails, just continue with the full history
-    if (!summary) return;
+    var sys = "You maintain a compact memory of a Verilog/hardware design chat. You are given the PRIOR " +
+      "SUMMARY, the PRIOR KEY FACTS, and NEW messages to fold in. MERGE the new messages into them and return " +
+      "ONLY JSON in this shape:\n" +
+      '{"summary":"<updated concise running summary of the whole conversation so far>",' +
+      '"facts":"<updated bullet list of DURABLE facts: module names, ports, bit-widths, clock/reset style, ' +
+      'parameters, constraints, design decisions, and open questions / next steps>"}\n' +
+      "Keep both tight, drop redundancy, and never lose a concrete interface detail or decision.";
+    var user = "PRIOR SUMMARY:\n" + (convSummary || "(none)") +
+      "\n\nPRIOR KEY FACTS:\n" + (convFacts || "(none)") +
+      "\n\nNEW MESSAGES TO FOLD IN:\n" + transcript;
+    var reply;
+    try { reply = await callLLM(provider, key, model, sys, [{ role: "user", content: user }]); }
+    catch (e) { return; } // on failure, leave the history intact and try again next turn
+    if (!reply) return;
 
-    // Persist the current (long) session before starting the new one.
-    try { await saveConversation(); } catch (e) {}
+    var obj = null;
+    try { var t = reply.replace(/```json|```/g, ""); obj = JSON.parse(t.slice(t.indexOf("{"), t.lastIndexOf("}") + 1)); } catch (e) {}
+    if (obj && typeof obj.summary === "string") convSummary = obj.summary.trim();
+    else convSummary = (convSummary ? convSummary + "\n\n" : "") + reply.trim(); // fallback: never drop info
+    if (obj && typeof obj.facts === "string") convFacts = obj.facts.trim();
 
-    // Fresh session seeded with the summary (kept as context for later turns).
-    chatHistory = [{ role: "assistant", content: "📝 Context summary (carried over from a longer chat):\n\n" + summary }];
-    currentConversationId = null;
-    localStorage.removeItem("last_conversation_id");
-    chatConversation.innerHTML = "";
-    renderConversation();
-    appendChatMsg("assistant", isSignedIn()
-      ? "🧵 This chat got long, so I summarized it and started a fresh session to keep context tight. Your previous chat is saved in History."
-      : "🧵 This chat got long, so I summarized the earlier messages to keep context tight.");
+    // Archive folded turns for retrieval, then trim the CONTEXT window to the recent tail.
+    // (We don't re-render — the user keeps seeing their full transcript this session; the
+    // trimmed window only bounds what we send to the LLM and what a reload restores.)
+    convArchive = convArchive.concat(toFold);
+    if (convArchive.length > ARCHIVE_MAX) convArchive = convArchive.slice(convArchive.length - ARCHIVE_MAX);
+    chatHistory = chatHistory.slice(foldCount);
     try { await saveConversation(); } catch (e) {}
+  }
+
+  // Lexical retrieval over the archived (folded-away) turns: score each by how many of the
+  // query's terms it contains and return the top-k, so a really long chat can still surface
+  // a relevant older message WITHOUT sending the whole archive. No embeddings needed.
+  var RETRIEVAL_STOP = { the:1, a:1, an:1, and:1, or:1, to:1, of:1, in:1, is:1, it:1, for:1, on:1, with:1, this:1, that:1, be:1, as:1, at:1, by:1, i:1, you:1, my:1, me:1, do:1, can:1, if:1, so:1, please:1, add:1, make:1, use:1, want:1 };
+  function retrievalTokens(s) {
+    var out = {}, m = String(s || "").toLowerCase().match(/[a-z0-9_]+/g) || [];
+    m.forEach(function (t) { if (t.length > 2 && !RETRIEVAL_STOP[t]) out[t] = 1; });
+    return out;
+  }
+  function retrieveFromArchive(query, k) {
+    if (!convArchive.length) return [];
+    var q = retrievalTokens(query);
+    if (!Object.keys(q).length) return [];
+    var scored = [];
+    convArchive.forEach(function (m) {
+      var terms = (String(m.content || "").toLowerCase().match(/[a-z0-9_]+/g) || []);
+      var score = 0, seen = {};
+      terms.forEach(function (t) { if (q[t] && !seen[t]) { score++; seen[t] = 1; } });
+      if (score > 0) scored.push({ score: score, m: m });
+    });
+    scored.sort(function (a, b) { return b.score - a.score; });
+    return scored.slice(0, k || 4).map(function (x) {
+      return (x.m.role === "user" ? "User: " : "Assistant: ") + String(x.m.content || "").slice(0, 500);
+    });
+  }
+
+  // Assemble the memory block to prepend to a conversational system prompt: durable key
+  // facts + the running summary + the most relevant archived messages for THIS query.
+  function memoryContext(query) {
+    var parts = [];
+    if (convFacts) parts.push("KEY FACTS (durable design decisions & interface):\n" + convFacts);
+    if (convSummary) parts.push("EARLIER CONVERSATION SUMMARY:\n" + convSummary);
+    var hits = retrieveFromArchive(query, 4);
+    if (hits.length) parts.push("RELEVANT EARLIER MESSAGES:\n" + hits.map(function (h) { return "- " + h; }).join("\n"));
+    return parts.length ? parts.join("\n\n") + "\n\n" : "";
+  }
+
+  // Persisted conversation payload = a hidden _meta record (summary/facts/archive) followed
+  // by the live turns. Kept in the messages array so no DB migration is needed.
+  function persistedMessages() {
+    return [{ role: "_meta", summary: convSummary, facts: convFacts, archive: convArchive }].concat(chatHistory);
+  }
+  // Split a loaded messages array back into memory state + live turns.
+  function loadPersistedMessages(messages) {
+    convSummary = ""; convFacts = ""; convArchive = [];
+    var arr = Array.isArray(messages) ? messages : [];
+    if (arr.length && arr[0] && arr[0].role === "_meta") {
+      convSummary = arr[0].summary || "";
+      convFacts = arr[0].facts || "";
+      convArchive = Array.isArray(arr[0].archive) ? arr[0].archive : [];
+      arr = arr.slice(1);
+    }
+    return arr;
   }
 
   // Build a compact context preamble for the AGENTIC BUILD flow so follow-up
@@ -3474,15 +3553,11 @@
   // carried-over summary (if any) + recent user requests. Excludes the current
   // message (still the last item in chatHistory) and system notices. Bounded.
   function buildContextPreamble() {
-    var prior = chatHistory.slice(0, -1); // everything before the current request
-    if (!prior.length) return "";
     var parts = [];
-    prior.forEach(function (m) {
-      if (m.content && /^📝 Context summary/.test(m.content)) parts.push(m.content);
-    });
-    var users = prior.filter(function (m) {
-      return m.role === "user" && m.content && !/^📝/.test(m.content);
-    });
+    if (convFacts) parts.push("KEY FACTS:\n" + convFacts);         // durable structured memory
+    if (convSummary) parts.push("EARLIER CONVERSATION SUMMARY:\n" + convSummary); // running summary
+    var prior = chatHistory.slice(0, -1); // recent turns before the current request
+    var users = prior.filter(function (m) { return m.role === "user" && m.content; });
     users.slice(-5).forEach(function (m) { parts.push("Earlier request: " + m.content); });
     var ctx = parts.join("\n\n").trim();
     if (!ctx) return "";
@@ -3497,14 +3572,14 @@
     if (currentConversationId == null) {
       var firstUser = chatHistory.find(function (m) { return m.role === "user"; });
       var title = ((firstUser && firstUser.content) || "New chat").slice(0, 60);
-      var ins = await dbCreateConversation({ title: title, provider: provider, model: model, messages: chatHistory });
+      var ins = await dbCreateConversation({ title: title, provider: provider, model: model, messages: persistedMessages() });
       if (!ins.error && ins.data) {
         currentConversationId = ins.data.id;
         localStorage.setItem("last_conversation_id", ins.data.id);
         loadConversations(); // refresh the list to show the new chat
       }
     } else {
-      await dbUpdateConversation(currentConversationId, { provider: provider, model: model, messages: chatHistory });
+      await dbUpdateConversation(currentConversationId, { provider: provider, model: model, messages: persistedMessages() });
     }
   }
 
