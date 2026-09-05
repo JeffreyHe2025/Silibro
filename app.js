@@ -1850,16 +1850,14 @@
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
-    // FOLLOW-UP ON THE PROJECT THIS CHAT JUST BUILT → classify BEFORE the generic
-    // router. Only when the SELECTED project is the one this chat built (currentProjectId
-    // === lastBuiltProjectId) do we treat the prompt as a possible edit; if a different
-    // project is selected, or none, it's a NEW design and goes through the full approval
-    // flow. A short follow-up like "change it to divide by 3, not 5" doesn't look like a
-    // build request to the router and would be wrongly bounced by the hardware topic
-    // gate below, so resolve it here: EDIT → apply in place (no approval popup, rebuild
-    // only affected modules). NEW → fresh chat + project, then the full flow. CHAT →
-    // answer as a question about the design (no rebuild, not blocked by the gate).
-    if (currentProjectId != null && currentProjectId === lastBuiltProjectId && designSpecText() &&
+    // ONE CHAT ↔ ONE PROJECT. Whenever a project is selected (even one this chat has no
+    // history for), the prompt targets THAT project: the full spec + every module is sent
+    // to both LLMs via runEditFlow, so they can edit it per the user's instructions. We
+    // classify the message first: EDIT → apply in place (no approval popup, rebuild only
+    // affected modules); CHAT → answer a question about the design; NEW → the user wants a
+    // DIFFERENT design, so we WARN them to start a new chat rather than build here (a new
+    // project belongs in a new chat).
+    if (currentProjectId != null && designSpecText() &&
         files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
       var exMods = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
       var intent = "EDIT"; // default: never silently discard their work
@@ -1899,12 +1897,16 @@
         }
         return;
       }
-      // NEW → open a fresh chat + deselect the current project, then fall through to
-      // the full build flow (ensureProject creates a new project below).
-      startNewProjectContext();
-      appendChatMsg("user", displayUserMsg, imgs);
-      chatHistory.push({ role: "user", content: displayUserMsg, images: imgs });
-      bubble = appendChatMsg("assistant", "🆕 New project — writing a fresh spec…");
+      // NEW → this chat belongs to the current project; a new design needs its own chat.
+      // Warn instead of building, so we don't overwrite this project or mix two designs.
+      bubble.textContent = "🆕 That sounds like a NEW design. Each chat works on one project, so this chat stays " +
+        "with \"" + (projectNameInput.value || "the current project") + "\". Click ✎ (New chat) at the top of the " +
+        "chat panel to start a fresh chat, then describe your new design there and I'll build it.";
+      chatHistory.push({ role: "assistant", content: bubble.textContent });
+      chatSend.disabled = false;
+      chatConversation.scrollTop = chatConversation.scrollHeight;
+      try { await saveConversation(); } catch (e) {}
+      return;
     }
 
     // Check if it's a project request
@@ -1979,18 +1981,6 @@
         return;
     }
 
-    // NEW design: if a project is selected that ISN'T the one this chat built, don't
-    // overwrite it — deselect so ensureProject creates a FRESH project for the new design.
-    // (Keeps the chat; only the project context resets.)
-    if (currentProjectId != null && currentProjectId !== lastBuiltProjectId) {
-      currentProjectId = null;
-      currentFileId = null;
-      files = [];
-      filesSection.classList.add("hidden");
-      closeEditorPanel();
-      renderProjectList();
-    }
-
     var ok = await ensureProject(fullPrompt, imgs);
     if (!ok) {
         chatSend.disabled = false;
@@ -2046,10 +2036,6 @@
   }
 
   var activeBuildThreadId = null; // the build currently running (for Stop)
-  // The project THIS chat last built into. A follow-up is treated as an EDIT only when
-  // the currently-selected project is this one; selecting a different project (or none)
-  // means a NEW design → the full spec-approval flow. Reset on a new chat.
-  var lastBuiltProjectId = null;
   function genUUID() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
     return "b-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
@@ -2432,7 +2418,6 @@
     if (data.stopped) consoleLog("⏹ Build stopped — partial progress saved.", "warn");
     else consoleLog("✅ Spec approved — Builder finished.", "ok");
     if (currentProjectId == null) { consoleLog("⚠ Open a project to save the built files.", "error"); return; }
-    lastBuiltProjectId = currentProjectId; // this chat built into this project → edits target it
     var filesObj = data.files || {};
     var edits = [];
     if (lastFlowSpec) edits.push({ name: "spec.md", content: lastFlowSpec });
@@ -3420,7 +3405,6 @@
   function newChat() {
     chatHistory = [];
     currentConversationId = null;
-    lastBuiltProjectId = null; // fresh chat → next prompt is a NEW design, not an edit
     localStorage.removeItem("last_conversation_id");
     chatConversation.innerHTML = "";
     showConversation();
