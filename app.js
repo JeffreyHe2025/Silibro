@@ -1850,6 +1850,23 @@
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
+    // IMPORTED / SPEC-LESS PROJECT → if the selected project has modules but no spec.md
+    // (e.g. an imported design), reverse-engineer a spec from the existing code FIRST so
+    // the pipeline and both LLMs know the design intent. Then fall through to the normal
+    // edit flow below (designSpecText() now returns the generated spec).
+    if (currentProjectId != null && !designSpecText() &&
+        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
+      bubble.textContent = "🧾 No spec found for this project — reverse-engineering one from the existing modules…";
+      var genSpec = await generateSpecFromFiles(provider, key, model);
+      if (genSpec) {
+        await applyFileEdits([{ name: "spec.md", content: genSpec }]); // saves + tags it as the spec
+        bubble.textContent = "🧾 Created spec.md by reverse-engineering the existing modules — building on it now.";
+        chatHistory.push({ role: "assistant", content: bubble.textContent });
+        bubble = appendChatMsg("assistant", "🤔 Thinking…");
+      }
+      // If generation failed, designSpecText() stays empty → the full flow writes a fresh spec.
+    }
+
     // ONE CHAT ↔ ONE PROJECT. Whenever a project is selected (even one this chat has no
     // history for), the prompt targets THAT project: the full spec + every module is sent
     // to both LLMs via runEditFlow, so they can edit it per the user's instructions. We
@@ -2147,6 +2164,27 @@
   // Follow-up edit to an existing project: no approval popup. Sends the change request
   // + current spec + current files to /flow/continue with editRequest; the backend
   // updates the spec and rebuilds/re-testbenches ONLY the affected modules, keeping the
+  // Reverse-engineer a design spec (Markdown, one '## <module>' section per module +
+  // '## Overview') from a project's existing Verilog — so a spec-less imported project can
+  // be continued by the pipeline (and both LLMs know the design intent). Returns the spec
+  // text, or "" if there's nothing to describe / the call fails.
+  async function generateSpecFromFiles(provider, key, model) {
+    var mods = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
+    if (!mods.length) return "";
+    var code = mods.map(function (f) { return "// === FILE: " + f.name + " ===\n" + (f.code || ""); }).join("\n\n");
+    var sys = "You are given all the Verilog/SystemVerilog modules of an existing project. Reverse-engineer a " +
+      "DESIGN SPECIFICATION in Markdown that accurately describes what the code does, so the design can be extended. " +
+      "Structure it as: a '# <Project Title>' line, a '## Overview' section, then ONE '## <module_name>' section per " +
+      "module — the heading text MUST be the EXACT module name from its 'module <name>' declaration. In each module " +
+      "section describe: purpose; every port (name, direction, bit-width); parameters and defaults; the clock and " +
+      "reset style (synchronous/asynchronous, active-high/-low); and the behavior — all INFERRED FROM THE CODE (do " +
+      "not invent features it does not have). Output ONLY the Markdown spec (no Verilog code blocks).";
+    try {
+      var reply = await callLLM(provider, key, model, sys, [{ role: "user", content: "Project modules:\n\n" + code }]);
+      return (reply || "").trim();
+    } catch (e) { return ""; }
+  }
+
   // rest. Saves the returned (updated) spec back to spec.md via finishFlowBuild.
   async function runEditFlow(bubble, editText, provider, key, model) {
     var base = getBackendUrl();
