@@ -795,27 +795,25 @@
     if (pd.timer) clearTimeout(pd.timer);
     lsRemovePending(LS_PENDING_PROJ_DEL, pd.id); // committing now → no startup re-flush
     hideDeleteToast();
+    // The linked chats were already removed from the UI at delete time (pd.chats); delete
+    // the project, then on success delete those chats from the DB too.
     dbDeleteProject(pd.id).then(function (res) {
-      if (res && res.error) { // server refused → put it back so nothing is silently lost
+      if (res && res.error) { // server refused → put the project AND its chats back
         restoreProjectToList(pd.project, pd.index);
+        restorePendingChats(pd);
         alert("Could not delete project: " + res.error.message);
         return;
       }
-      // Project gone → delete every chat linked to it too.
-      var linked = conversations.filter(function (c) { return c.project_id === pd.id; });
-      linked.forEach(function (c) { dbDeleteConversation(c.id); });
-      if (linked.length) {
-        conversations = conversations.filter(function (c) { return c.project_id !== pd.id; });
-        if (currentConversationId && linked.some(function (c) { return c.id === currentConversationId; })) {
-          currentConversationId = null; chatHistory = [];
-          convSummary = ""; convFacts = ""; convArchive = [];
-          chatConversation.innerHTML = "";
-          localStorage.removeItem("last_conversation_id");
-        }
-        renderHistoryList();
-        renderProjectChats();
-      }
+      (pd.chats || []).forEach(function (c) { dbDeleteConversation(c.id); });
     });
+  }
+  // Put a project's optimistically-removed chats back into the list (undo / error).
+  function restorePendingChats(pd) {
+    (pd.chats || []).forEach(function (c) {
+      if (!conversations.some(function (x) { return x.id === c.id; })) conversations.push(c);
+    });
+    renderHistoryList();
+    renderProjectChats();
   }
   function undoPendingProjectDelete() {
     if (!pendingProjectDelete) return;
@@ -825,7 +823,8 @@
     lsRemovePending(LS_PENDING_PROJ_DEL, pd.id); // undone → don't delete it at startup
     hideDeleteToast();
     restoreProjectToList(pd.project, pd.index);
-    openProject(pd.id); // reopen it, restoring the previous view
+    restorePendingChats(pd);           // put the linked chats back too
+    openProject(pd.id);                // reopen it, restoring the previous view + chat list
   }
   function showUndoToast(message, onUndo) {
     hideDeleteToast();
@@ -854,7 +853,10 @@
     var index = projects.findIndex(function (p) { return p.id === id; });
     var project = index >= 0 ? projects[index] : null;
     if (!project) return;
-    // Optimistically remove from the list + clear the current view.
+    // Capture the linked chats so we can remove them from the UI RIGHT NOW (no lag) and
+    // restore them on undo. Their DB rows are deleted at commit time.
+    var linkedChats = conversations.filter(function (c) { return c.project_id === id; });
+    // Optimistically remove the project from the list + clear the current view.
     projects = projects.filter(function (p) { return p.id !== id; });
     currentProjectId = null;
     currentFileId = null;
@@ -862,10 +864,21 @@
     filesSection.classList.add("hidden");
     closeEditorPanel();
     renderProjectList();
+    // Optimistically remove its chats too, so they disappear with the project.
+    if (linkedChats.length) {
+      conversations = conversations.filter(function (c) { return c.project_id !== id; });
+      if (currentConversationId && linkedChats.some(function (c) { return c.id === currentConversationId; })) {
+        currentConversationId = null; chatHistory = [];
+        convSummary = ""; convFacts = ""; convArchive = [];
+        chatConversation.innerHTML = "";
+        localStorage.removeItem("last_conversation_id");
+      }
+      renderHistoryList();
+    }
     // Defer the real delete 6s; the toast (click = undo) cancels it. Record it so a
     // reload within the window still deletes it (flushed at startup).
     lsAddPending(LS_PENDING_PROJ_DEL, id);
-    pendingProjectDelete = { id: id, project: project, index: index, timer: null };
+    pendingProjectDelete = { id: id, project: project, index: index, chats: linkedChats, timer: null };
     pendingProjectDelete.timer = setTimeout(commitPendingProjectDelete, 6000);
     showUndoToast("🗑 Deleting project…", undoPendingProjectDelete);
   });
