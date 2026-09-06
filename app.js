@@ -764,6 +764,21 @@
       if (res && res.error) { // server refused → put it back so nothing is silently lost
         restoreProjectToList(pd.project, pd.index);
         alert("Could not delete project: " + res.error.message);
+        return;
+      }
+      // Project gone → delete every chat linked to it too.
+      var linked = conversations.filter(function (c) { return c.project_id === pd.id; });
+      linked.forEach(function (c) { dbDeleteConversation(c.id); });
+      if (linked.length) {
+        conversations = conversations.filter(function (c) { return c.project_id !== pd.id; });
+        if (currentConversationId && linked.some(function (c) { return c.id === currentConversationId; })) {
+          currentConversationId = null; chatHistory = [];
+          convSummary = ""; convFacts = ""; convArchive = [];
+          chatConversation.innerHTML = "";
+          localStorage.removeItem("last_conversation_id");
+        }
+        renderHistoryList();
+        renderProjectChats();
       }
     });
   }
@@ -1820,6 +1835,18 @@
     return true;
   }
 
+  // True if the selected project holds a REAL design — a Verilog module that isn't just
+  // the untouched default starter that "+ New" seeds — so a freshly-created Silebro
+  // project isn't mistaken for an imported / spec-less design.
+  function hasRealDesign() {
+    var starter = String(STARTER_CODE || "").trim();
+    return files.some(function (f) {
+      if (!isVerilogName(f.name) || f.name === "netlist.v") return false;
+      var code = String(f.code || "").trim();
+      return code && code !== starter;
+    });
+  }
+
   async function startVerifierFlow() {
     var base = getBackendUrl();
     if (!base) {
@@ -1864,11 +1891,11 @@
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
-    // Project selected with modules but NO spec (e.g. an imported design) → don't guess:
-    // ask how to provide one (pick an existing file / import one / let the AI write one).
-    // After a spec is set, the chosen handler resumes the original prompt.
-    if (currentProjectId != null && !designSpecText() &&
-        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
+    // Project selected with a REAL design but NO spec (e.g. an imported project) → don't
+    // guess: ask how to provide one (pick an existing file / import one / let the AI write
+    // one). hasRealDesign() ignores the default starter, so a freshly-created Silebro
+    // project isn't mistaken for an import. After a spec is set, the handler resumes.
+    if (currentProjectId != null && !designSpecText() && hasRealDesign()) {
       bubble.textContent = "🧾 This project has no design spec yet. Choose how to set one so I can work on it:";
       chatHistory.push({ role: "assistant", content: bubble.textContent });
       showSpecChoice({ promptText: promptText, fullPrompt: fullPrompt, displayUserMsg: displayUserMsg,
@@ -1879,9 +1906,9 @@
       return;
     }
 
-    // Project selected WITH a spec → handle the prompt against it (edit / question / new).
-    if (currentProjectId != null && designSpecText() &&
-        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
+    // Project selected WITH a spec and a real design → handle the prompt against it
+    // (edit / question / new).
+    if (currentProjectId != null && designSpecText() && hasRealDesign()) {
       await handleProjectEditPrompt(promptText, fullPrompt, displayUserMsg, imgs, provider, key, model, bubble);
       return;
     }
