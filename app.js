@@ -266,18 +266,22 @@
   // --- Conversations (chat history) ---
   async function dbListConversations() {
     if (GUEST) {
-      var cs = lsGet(GK_CONVOS, []).map(function (c) { return { id: c.id, title: c.title, updated_at: c.updated_at }; });
+      var cs = lsGet(GK_CONVOS, []).map(function (c) { return { id: c.id, title: c.title, updated_at: c.updated_at, project_id: c.project_id || null }; });
       cs.sort(function (a, b) { return String(b.updated_at || "").localeCompare(String(a.updated_at || "")); });
       return { data: cs, error: null };
     }
-    return await sb.from("conversations").select("id, title, updated_at").order("updated_at", { ascending: false });
+    var r = await sb.from("conversations").select("id, title, updated_at, project_id").order("updated_at", { ascending: false });
+    if (r.error) r = await sb.from("conversations").select("id, title, updated_at").order("updated_at", { ascending: false }); // project_id column not added yet
+    return r;
   }
   async function dbGetConversation(id) {
     if (GUEST) {
       var c = lsGet(GK_CONVOS, []).find(function (x) { return x.id === id; });
-      return { data: c ? { id: c.id, messages: c.messages } : null, error: c ? null : { message: "not found" } };
+      return { data: c ? { id: c.id, messages: c.messages, project_id: c.project_id || null } : null, error: c ? null : { message: "not found" } };
     }
-    return await sb.from("conversations").select("id, messages").eq("id", id).single();
+    var r = await sb.from("conversations").select("id, messages, project_id").eq("id", id).single();
+    if (r.error) r = await sb.from("conversations").select("id, messages").eq("id", id).single(); // project_id column not added yet
+    return r;
   }
   async function dbCreateConversation(rec) {
     if (GUEST) {
@@ -682,6 +686,7 @@
     projectNameInput.value = p.name || "";
     filesSection.classList.remove("hidden");
     renderProjectList();
+    renderProjectChats(); // show the chats linked to this project
     closeEditorPanel();
     loadFiles(id);
   }
@@ -721,6 +726,15 @@
       var p = projects.find(function (x) { return x.id === currentProjectId; });
       if (p) p.name = name;
       renderProjectList();
+      // Keep linked chats named after the project.
+      conversations.forEach(function (c) {
+        if (c.project_id === currentProjectId && c.title !== name) {
+          c.title = name;
+          dbUpdateConversation(c.id, { title: name });
+        }
+      });
+      renderHistoryList();
+      renderProjectChats();
     });
   });
 
@@ -2227,6 +2241,7 @@
     }
     if (intent === "EDIT") {
       await runEditFlow(bubble, fullPrompt, provider, key, model);
+      try { await linkChatToProject(); } catch (e) {} // link + name the chat after its project
       return;
     }
     if (intent === "CHAT") {
@@ -2243,6 +2258,7 @@
         chatSend.disabled = false;
         chatConversation.scrollTop = chatConversation.scrollHeight;
         try { await saveConversation(); } catch (e) {}
+        try { await linkChatToProject(); } catch (e) {} // link + name the chat after its project
       }
       return;
     }
@@ -2605,6 +2621,7 @@
     }
     if (data.stopped) showContinueButton(); // let the user resume where it left off
     try { await saveConversation(); } catch (e) {}
+    try { await linkChatToProject(); } catch (e) {} // link + name this chat after the project it built
   }
 
   // Does the Verifier's final review carry a FAILED verdict?
@@ -3488,6 +3505,7 @@
     var res = await dbListConversations();
     conversations = res.data || [];
     renderHistoryList();
+    renderProjectChats(); // keep the open project's chat list in sync
     // Only the initial sign-in load restores the last chat. Opening the history
     // list (☰) must NOT auto-open, or it boots the user straight into a chat.
     if (autoOpen && chatHistory.length === 0 && conversations.length > 0 && currentConversationId == null) {
@@ -3534,7 +3552,13 @@
     localStorage.setItem("last_conversation_id", id);
     // Restore long-chat memory (summary/facts/archive) + the recent turns.
     chatHistory = loadPersistedMessages(res.data.messages);
+    // One chat ↔ one project: open the linked project so its files are in context.
+    if (res.data.project_id && res.data.project_id !== currentProjectId &&
+        projects.some(function (p) { return p.id === res.data.project_id; })) {
+      openProject(res.data.project_id);
+    }
     renderConversation();
+    renderProjectChats(); // reflect the active chat in the project's chat list
     showConversation();
   }
 
@@ -3698,6 +3722,48 @@
     } else {
       await dbUpdateConversation(currentConversationId, { provider: provider, model: model, messages: persistedMessages() });
     }
+  }
+
+  // Link the OPEN chat to the project it's working on and name the chat after that
+  // project. Called once the chat first runs against a project (built it, edited it, or
+  // answered a question about it). On first link the chat is renamed to the project name;
+  // an already-linked chat keeps its (possibly manually renamed) title.
+  async function linkChatToProject() {
+    if (currentProjectId == null) return;
+    try { await saveConversation(); } catch (e) {} // ensure the conversation row exists
+    if (currentConversationId == null) return;
+    var existing = conversations.find(function (x) { return x.id === currentConversationId; });
+    var already = existing && existing.project_id === currentProjectId;
+    var proj = projects.find(function (p) { return p.id === currentProjectId; });
+    var pname = (proj && proj.name) || projectNameInput.value.trim() || "Project";
+    var fields = { project_id: currentProjectId };
+    if (!already) fields.title = pname; // name the chat after its project on first link
+    try { await dbUpdateConversation(currentConversationId, fields); } catch (e) {}
+    if (existing) { existing.project_id = currentProjectId; if (!already) existing.title = pname; }
+    else { try { await loadConversations(); } catch (e) {} }
+    renderHistoryList();
+    renderProjectChats();
+  }
+
+  // List the chats linked to the currently-open project in the sidebar (under Files).
+  function renderProjectChats() {
+    var ul = $("project-chats");
+    if (!ul) return;
+    ul.innerHTML = "";
+    var mine = currentProjectId == null ? [] :
+      conversations.filter(function (c) { return c.project_id && c.project_id === currentProjectId; });
+    var empty = $("project-chats-empty");
+    if (empty) empty.classList.toggle("hidden", mine.length > 0);
+    mine.forEach(function (c) {
+      var li = document.createElement("li");
+      li.dataset.id = c.id;
+      if (c.id === currentConversationId) li.classList.add("active");
+      var icon = document.createElement("span"); icon.className = "item-icon"; icon.textContent = "💬";
+      var label = document.createElement("span"); label.className = "item-label"; label.textContent = c.title || "Chat";
+      li.appendChild(icon); li.appendChild(label);
+      li.addEventListener("click", function () { openConversation(c.id); });
+      ul.appendChild(li);
+    });
   }
 
   async function renameConversation(id, currentTitle) {
