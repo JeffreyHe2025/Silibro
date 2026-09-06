@@ -627,8 +627,10 @@
     filesSection.classList.add("hidden");
     closeEditorPanel();
     initEditor();
-    loadProjects();
-    loadConversations(true); // initial restore of last chat
+    // Load projects FIRST, then restore the last chat — so openConversation can re-select
+    // the chat's linked project. Otherwise currentProjectId stays null and the next prompt
+    // would spin up a brand-new project on every reload.
+    loadProjects().then(function () { loadConversations(true); });
     renderChatView();
   }
 
@@ -671,7 +673,7 @@
   }
 
   function loadProjects() {
-    dbListProjects().then(function (res) {
+    return dbListProjects().then(function (res) {
       if (res.error) { alert("Could not load projects: " + res.error.message); return; }
       projects = res.data || [];
       renderProjectList();
