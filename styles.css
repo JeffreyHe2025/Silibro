@@ -1485,3 +1485,8 @@ body.console-resizing, body.console-resizing * {
 .undo-toast.show { opacity: 1; transform: translateY(0); }
 .undo-toast:hover { background: #374151; }
 .undo-toast-action { color: #93c5fd; font-weight: 600; text-decoration: underline; }
+
+/* Spec picker (imported project with no spec): stacked choice buttons in a chat bubble */
+.spec-choice { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.spec-choice .btn { width: auto; }
+.spec-choice-label { font-size: 13px; opacity: .85; margin-bottom: 2px; }

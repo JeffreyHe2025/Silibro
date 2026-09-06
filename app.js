@@ -1850,89 +1850,25 @@
     var bubble = appendChatMsg("assistant", "🤔 Thinking...");
     chatSend.disabled = true;
 
-    // IMPORTED / SPEC-LESS PROJECT → if the selected project has modules but no spec.md
-    // (e.g. an imported design), reverse-engineer a spec from the existing code FIRST so
-    // the pipeline and both LLMs know the design intent. Then fall through to the normal
-    // edit flow below (designSpecText() now returns the generated spec).
+    // Project selected with modules but NO spec (e.g. an imported design) → don't guess:
+    // ask how to provide one (pick an existing file / import one / let the AI write one).
+    // After a spec is set, the chosen handler resumes the original prompt.
     if (currentProjectId != null && !designSpecText() &&
         files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
-      bubble.textContent = "🧾 No spec found for this project — reverse-engineering one from the existing modules…";
-      var genSpec = await generateSpecFromFiles(provider, key, model);
-      if (genSpec) {
-        await applyFileEdits([{ name: "spec.md", content: genSpec }]); // saves + tags it as the spec
-        bubble.textContent = "🧾 Created spec.md by reverse-engineering the existing modules — building on it now.";
-        chatHistory.push({ role: "assistant", content: bubble.textContent });
-        bubble = appendChatMsg("assistant", "🤔 Thinking…");
-      }
-      // If generation failed, designSpecText() stays empty → the full flow writes a fresh spec.
-    }
-
-    // ONE CHAT ↔ ONE PROJECT. Whenever a project is selected (even one this chat has no
-    // history for), the prompt targets THAT project: the full spec + every module is sent
-    // to both LLMs via runEditFlow, so they can edit it per the user's instructions. We
-    // classify the message first: EDIT → apply in place (no approval popup, rebuild only
-    // affected modules); CHAT → answer a question about the design; NEW → the user wants a
-    // DIFFERENT design, so we WARN them to start a new chat rather than build here (a new
-    // project belongs in a new chat).
-    if (currentProjectId != null && designSpecText() &&
-        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
-      var exMods = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
-      var intent = "EDIT"; // default: never silently discard their work
-      if (!imgs.length) {
-        try {
-          var modList = exMods.map(function (f) { return f.name; }).join(", ");
-          var sysEdit = "The user already has a Verilog project (modules: " + modList + ").\n" +
-            "Current design spec:\n" + String(designSpecText()).slice(0, 1500) + "\n\n" +
-            "Classify the user's new message:\n" +
-            "- EDIT: asks to modify, fix, change, or extend THIS existing design.\n" +
-            "- NEW: asks to build a DIFFERENT, unrelated hardware design from scratch.\n" +
-            "- CHAT: a question, explanation, or comment that does NOT ask to change the design.\n" +
-            "Reply with only one word: EDIT, NEW, or CHAT.";
-          var eRes = await callLLM(provider, key, model, sysEdit, [{ role: "user", content: promptText }]);
-          if (/^\s*new\b/i.test(eRes || "")) intent = "NEW";
-          else if (/^\s*chat\b/i.test(eRes || "")) intent = "CHAT";
-        } catch (e) { /* on failure, keep the safe default (EDIT) */ }
-      }
-      if (intent === "EDIT") {
-        await runEditFlow(bubble, fullPrompt, provider, key, model);
-        return;
-      }
-      if (intent === "CHAT") {
-        try {
-          var sysC = memoryContext(promptText) + buildProjectContext();
-          var replyC = await callLLM(provider, key, model, sysC, chatHistory);
-          var dispC = stripFileBlocks(replyC);
-          bubble.textContent = dispC;
-          chatHistory.push({ role: "assistant", content: dispC });
-        } catch (err) {
-          bubble.textContent = "Error: " + (err.message || err);
-          bubble.classList.add("chat-error");
-        } finally {
-          chatSend.disabled = false;
-          chatConversation.scrollTop = chatConversation.scrollHeight;
-          try { await saveConversation(); } catch (e) {}
-        }
-        return;
-      }
-      // NEW → this chat belongs to the current project; a new design needs its own chat.
-      // Offer a one-click button that starts a fresh chat (deselecting the project) so the
-      // user doesn't have to do it manually — no overwriting or mixing two designs.
-      bubble.textContent = "🆕 This sounds like a new project. Each chat works on only one project.";
+      bubble.textContent = "🧾 This project has no design spec yet. Choose how to set one so I can work on it:";
       chatHistory.push({ role: "assistant", content: bubble.textContent });
-      var ncWrap = document.createElement("div");
-      ncWrap.className = "chat-msg assistant build-controls";
-      var ncBtn = document.createElement("button");
-      ncBtn.className = "btn";
-      ncBtn.textContent = "✎ Start new chat";
-      ncBtn.addEventListener("click", function () {
-        if (ncWrap.parentNode) ncWrap.parentNode.removeChild(ncWrap);
-        startNewProjectContext(); // deselect the project + open a fresh chat for the new design
-      });
-      ncWrap.appendChild(ncBtn);
-      chatConversation.appendChild(ncWrap);
+      showSpecChoice({ promptText: promptText, fullPrompt: fullPrompt, displayUserMsg: displayUserMsg,
+        imgs: imgs, provider: provider, key: key, model: model });
       chatSend.disabled = false;
       chatConversation.scrollTop = chatConversation.scrollHeight;
       try { await saveConversation(); } catch (e) {}
+      return;
+    }
+
+    // Project selected WITH a spec → handle the prompt against it (edit / question / new).
+    if (currentProjectId != null && designSpecText() &&
+        files.some(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })) {
+      await handleProjectEditPrompt(promptText, fullPrompt, displayUserMsg, imgs, provider, key, model, bubble);
       return;
     }
 
@@ -2183,6 +2119,149 @@
       var reply = await callLLM(provider, key, model, sys, [{ role: "user", content: "Project modules:\n\n" + code }]);
       return (reply || "").trim();
     } catch (e) { return ""; }
+  }
+
+  // === Spec picker for an imported / spec-less project =========================
+  // Resume the user's ORIGINAL prompt once a spec has been established.
+  async function resumeWithSpec(ctx) {
+    var bubble = appendChatMsg("assistant", "🤔 Thinking…");
+    chatSend.disabled = true;
+    await handleProjectEditPrompt(ctx.promptText, ctx.fullPrompt, ctx.displayUserMsg, ctx.imgs, ctx.provider, ctx.key, ctx.model, bubble);
+  }
+
+  // Offer three ways to set a spec: pick an existing file, import one, or let the AI write it.
+  function showSpecChoice(ctx) {
+    var wrap = document.createElement("div");
+    wrap.className = "chat-msg assistant spec-choice";
+    function removeWrap() { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }
+    function mkBtn(label, handler) {
+      var b = document.createElement("button");
+      b.className = "btn"; b.textContent = label;
+      b.addEventListener("click", handler);
+      return b;
+    }
+    wrap.appendChild(mkBtn("📄 Choose an existing file as the spec", function () {
+      showExistingSpecPicker(wrap, ctx);
+    }));
+    wrap.appendChild(mkBtn("⬆ Import a spec file", function () {
+      removeWrap(); importSpecFile(ctx);
+    }));
+    wrap.appendChild(mkBtn("🤖 Let the AI write one from the code", async function () {
+      removeWrap();
+      var b = appendChatMsg("assistant", "🧾 Reverse-engineering a spec from the existing modules…");
+      var genSpec = await generateSpecFromFiles(ctx.provider, ctx.key, ctx.model);
+      if (!genSpec) { b.textContent = "⚠ Couldn't generate a spec from the code."; b.classList.add("chat-error"); chatSend.disabled = false; return; }
+      await applyFileEdits([{ name: "spec.md", content: genSpec }]); // saves + tags spec.md
+      b.textContent = "🧾 Created spec.md by reverse-engineering the existing modules.";
+      chatHistory.push({ role: "assistant", content: b.textContent });
+      await resumeWithSpec(ctx);
+    }));
+    chatConversation.appendChild(wrap);
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+  }
+
+  // Replace the choice buttons with a list of the project's files to pick as the spec
+  // (non-Verilog first; tagging via addSpec makes designSpecText() return it).
+  function showExistingSpecPicker(wrap, ctx) {
+    wrap.innerHTML = "";
+    var lbl = document.createElement("div");
+    lbl.className = "spec-choice-label";
+    lbl.textContent = "Pick the file to use as the design spec:";
+    wrap.appendChild(lbl);
+    var cand = files.filter(function (f) { return !isVerilogName(f.name) && f.name !== "netlist.v"; });
+    if (!cand.length) cand = files.slice();
+    if (!cand.length) { lbl.textContent = "No files to use — import one or let the AI write it."; return; }
+    cand.forEach(function (f) {
+      var b = document.createElement("button");
+      b.className = "btn"; b.textContent = "📄 " + f.name;
+      b.addEventListener("click", async function () {
+        addSpec(f.id); updateSpecButton();
+        if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+        var note = "📄 Using " + f.name + " as the design spec.";
+        appendChatMsg("assistant", note); chatHistory.push({ role: "assistant", content: note });
+        await resumeWithSpec(ctx);
+      });
+      wrap.appendChild(b);
+    });
+  }
+
+  // Import a file from the user's computer, tag it as the spec, then resume.
+  function importSpecFile(ctx) {
+    var inp = document.createElement("input");
+    inp.type = "file"; inp.accept = ".md,.markdown,.txt";
+    inp.addEventListener("change", async function () {
+      var f = inp.files && inp.files[0];
+      if (!f) { chatSend.disabled = false; return; }
+      var text = ""; try { text = await f.text(); } catch (e) {}
+      var name = /\.(md|markdown|txt)$/i.test(f.name) ? f.name : "spec.md";
+      await applyFileEdits([{ name: name, content: text }]);
+      var created = files.find(function (x) { return x.name === name; });
+      if (created) { addSpec(created.id); updateSpecButton(); }
+      var note = "⬆ Imported " + name + " and set it as the design spec.";
+      appendChatMsg("assistant", note); chatHistory.push({ role: "assistant", content: note });
+      await resumeWithSpec(ctx);
+    });
+    inp.click();
+  }
+
+  // Classify a prompt against the SELECTED project and dispatch: EDIT (apply in place),
+  // CHAT (answer a question), or NEW (warn + one-click new chat). Shared by the normal
+  // flow and the spec-picker resume.
+  async function handleProjectEditPrompt(promptText, fullPrompt, displayUserMsg, imgs, provider, key, model, bubble) {
+    var exMods = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; });
+    var intent = "EDIT"; // default: never silently discard their work
+    if (!imgs.length) {
+      try {
+        var modList = exMods.map(function (f) { return f.name; }).join(", ");
+        var sysEdit = "The user already has a Verilog project (modules: " + modList + ").\n" +
+          "Current design spec:\n" + String(designSpecText()).slice(0, 1500) + "\n\n" +
+          "Classify the user's new message:\n" +
+          "- EDIT: asks to modify, fix, change, or extend THIS existing design.\n" +
+          "- NEW: asks to build a DIFFERENT, unrelated hardware design from scratch.\n" +
+          "- CHAT: a question, explanation, or comment that does NOT ask to change the design.\n" +
+          "Reply with only one word: EDIT, NEW, or CHAT.";
+        var eRes = await callLLM(provider, key, model, sysEdit, [{ role: "user", content: promptText }]);
+        if (/^\s*new\b/i.test(eRes || "")) intent = "NEW";
+        else if (/^\s*chat\b/i.test(eRes || "")) intent = "CHAT";
+      } catch (e) { /* on failure, keep the safe default (EDIT) */ }
+    }
+    if (intent === "EDIT") {
+      await runEditFlow(bubble, fullPrompt, provider, key, model);
+      return;
+    }
+    if (intent === "CHAT") {
+      try {
+        var sysC = memoryContext(promptText) + buildProjectContext();
+        var replyC = await callLLM(provider, key, model, sysC, chatHistory);
+        var dispC = stripFileBlocks(replyC);
+        bubble.textContent = dispC;
+        chatHistory.push({ role: "assistant", content: dispC });
+      } catch (err) {
+        bubble.textContent = "Error: " + (err.message || err);
+        bubble.classList.add("chat-error");
+      } finally {
+        chatSend.disabled = false;
+        chatConversation.scrollTop = chatConversation.scrollHeight;
+        try { await saveConversation(); } catch (e) {}
+      }
+      return;
+    }
+    // NEW → a new design needs its own chat; offer a one-click "start new chat" button.
+    bubble.textContent = "🆕 This sounds like a new project. Each chat works on only one project.";
+    chatHistory.push({ role: "assistant", content: bubble.textContent });
+    var ncWrap = document.createElement("div");
+    ncWrap.className = "chat-msg assistant build-controls";
+    var ncBtn = document.createElement("button");
+    ncBtn.className = "btn"; ncBtn.textContent = "✎ Start new chat";
+    ncBtn.addEventListener("click", function () {
+      if (ncWrap.parentNode) ncWrap.parentNode.removeChild(ncWrap);
+      startNewProjectContext();
+    });
+    ncWrap.appendChild(ncBtn);
+    chatConversation.appendChild(ncWrap);
+    chatSend.disabled = false;
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+    try { await saveConversation(); } catch (e) {}
   }
 
   // rest. Saves the returned (updated) spec back to spec.md via finishFlowBuild.
@@ -4414,6 +4493,14 @@
   }
   // The whole-design spec the Verifier wrote (a saved spec.md, else this session's).
   function designSpecText() {
+    // A file the user (or the pipeline) tagged as the spec wins — so "Use as spec" and
+    // the spec picker work with ANY filename — then fall back to a file literally named
+    // spec.md, then the last built spec.
+    var ids = getSpecIds();
+    if (ids.length) {
+      var tagged = files.find(function (f) { return ids.indexOf(f.id) !== -1 && f.code; });
+      if (tagged) return tagged.code;
+    }
     var sf = files.find(function (f) { return /^spec\.md$/i.test(f.name); });
     return (sf && sf.code) || lastFlowSpec || "";
   }
