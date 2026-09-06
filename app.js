@@ -176,6 +176,35 @@
   }
   function lsGet(k, d) { try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch (e) { return d; } }
   function lsSet(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+
+  // Deletes use a 6s "undo" that defers the real DB delete with setTimeout — which is
+  // lost if the page reloads/closes in that window, so the item reappears. We also record
+  // each pending delete here and flush any leftovers at startup, so deletes survive reload.
+  var LS_PENDING_PROJ_DEL = "pending_project_deletes";
+  var LS_PENDING_CHAT_DEL = "pending_chat_deletes";
+  function lsAddPending(key, id) { var a = lsGet(key, []); if (a.indexOf(id) === -1) { a.push(id); lsSet(key, a); } }
+  function lsRemovePending(key, id) { lsSet(key, lsGet(key, []).filter(function (x) { return x !== id; })); }
+  // Commit deletes still pending from a previous session, BEFORE the lists load, so a
+  // deleted project/chat doesn't come back. Also cascades chats of deleted projects.
+  async function flushPersistedDeletes() {
+    var projs = lsGet(LS_PENDING_PROJ_DEL, []);
+    var chats = lsGet(LS_PENDING_CHAT_DEL, []);
+    for (var i = 0; i < projs.length; i++) { try { await dbDeleteProject(projs[i]); } catch (e) {} }
+    for (var j = 0; j < chats.length; j++) { try { await dbDeleteConversation(chats[j]); } catch (e) {} }
+    if (projs.length) {
+      try {
+        var res = await dbListConversations();
+        var all = (res && res.data) || [];
+        for (var k = 0; k < all.length; k++) {
+          if (all[k].project_id && projs.indexOf(all[k].project_id) !== -1) {
+            try { await dbDeleteConversation(all[k].id); } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
+    lsSet(LS_PENDING_PROJ_DEL, []);
+    lsSet(LS_PENDING_CHAT_DEL, []);
+  }
   var GK_PROJECTS = "guest_projects";
   var GK_CONVOS = "guest_conversations";
   function gkFiles(pid) { return "guest_files_" + pid; }
@@ -627,10 +656,13 @@
     filesSection.classList.add("hidden");
     closeEditorPanel();
     initEditor();
-    // Load projects FIRST, then restore the last chat — so openConversation can re-select
-    // the chat's linked project. Otherwise currentProjectId stays null and the next prompt
-    // would spin up a brand-new project on every reload.
-    loadProjects().then(function () { loadConversations(true); });
+    // Commit any deletes that were mid-undo when the page last closed (so they don't come
+    // back), THEN load projects, THEN restore the last chat — so openConversation can
+    // re-select the chat's linked project. Otherwise currentProjectId stays null and the
+    // next prompt would spin up a brand-new project on every reload.
+    flushPersistedDeletes()
+      .then(function () { return loadProjects(); })
+      .then(function () { loadConversations(true); });
     renderChatView();
   }
 
@@ -761,6 +793,7 @@
     var pd = pendingProjectDelete;
     pendingProjectDelete = null;
     if (pd.timer) clearTimeout(pd.timer);
+    lsRemovePending(LS_PENDING_PROJ_DEL, pd.id); // committing now → no startup re-flush
     hideDeleteToast();
     dbDeleteProject(pd.id).then(function (res) {
       if (res && res.error) { // server refused → put it back so nothing is silently lost
@@ -789,6 +822,7 @@
     var pd = pendingProjectDelete;
     pendingProjectDelete = null;
     if (pd.timer) clearTimeout(pd.timer);
+    lsRemovePending(LS_PENDING_PROJ_DEL, pd.id); // undone → don't delete it at startup
     hideDeleteToast();
     restoreProjectToList(pd.project, pd.index);
     openProject(pd.id); // reopen it, restoring the previous view
@@ -828,7 +862,9 @@
     filesSection.classList.add("hidden");
     closeEditorPanel();
     renderProjectList();
-    // Defer the real delete 6s; the toast (click = undo) cancels it.
+    // Defer the real delete 6s; the toast (click = undo) cancels it. Record it so a
+    // reload within the window still deletes it (flushed at startup).
+    lsAddPending(LS_PENDING_PROJ_DEL, id);
     pendingProjectDelete = { id: id, project: project, index: index, timer: null };
     pendingProjectDelete.timer = setTimeout(commitPendingProjectDelete, 6000);
     showUndoToast("🗑 Deleting project…", undoPendingProjectDelete);
@@ -3816,6 +3852,7 @@
     var pd = pendingChatDelete;
     pendingChatDelete = null;
     if (pd.timer) clearTimeout(pd.timer);
+    lsRemovePending(LS_PENDING_CHAT_DEL, pd.id); // committing now → no startup re-flush
     hideDeleteToast();
     dbDeleteConversation(pd.id); // fire-and-forget; the row is already gone from the UI
   }
@@ -3824,6 +3861,7 @@
     var pd = pendingChatDelete;
     pendingChatDelete = null;
     if (pd.timer) clearTimeout(pd.timer);
+    lsRemovePending(LS_PENDING_CHAT_DEL, pd.id); // undone → don't delete it at startup
     hideDeleteToast();
     if (!conversations.some(function (c) { return c.id === pd.conv.id; })) {
       var i = (pd.index >= 0 && pd.index <= conversations.length) ? pd.index : conversations.length;
@@ -3848,6 +3886,7 @@
       chatConversation.innerHTML = "";
     }
     renderHistoryList();
+    lsAddPending(LS_PENDING_CHAT_DEL, id); // survive a reload within the undo window
     pendingChatDelete = { id: id, conv: conv, index: index, wasCurrent: wasCurrent, timer: null };
     pendingChatDelete.timer = setTimeout(commitPendingChatDelete, 6000);
     showUndoToast("🗑 Deleting chat…", undoPendingChatDelete);
