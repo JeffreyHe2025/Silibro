@@ -301,6 +301,49 @@ function buildHeader(name, contract) {
   return h;
 }
 
+// #1 (contract cross-check): extract the port names the SPEC plainly declares, so we can
+// tell when the Verifier's interface contract dropped one. Two conservative patterns:
+//   (a) Verilog-style decls in the prose: "input signed [15:0] x", "output reg y"
+//   (b) definition lines: "x: Signed 16-bit input …" / "- y : unsigned 8-bit output …"
+// Returns a { lowercaseName: originalName } map. Deliberately conservative — a miss just
+// means the header is kept; a false hit only drops the header (safe: Builder writes it all).
+const PORT_QUALIFIERS = /^(wire|reg|logic|signed|unsigned|bit|port|ports|signal|signals|the|a|an|it|is|this)$/i;
+function specPortNames(specText) {
+  const s = String(specText || "");
+  const names = {};
+  // (a) Definition lines UNDER a ports/interface heading only, e.g.
+  //     "Input ports:\n  x: Signed 16-bit input …". Scoping to the section avoids grabbing
+  //     unrelated lines like "Implementation:" that merely contain the word "output".
+  const lines = s.split("\n");
+  let inPorts = false;
+  const portsHeading = /\b(input ports|output ports|ports|port list|interface|signals|inputs|outputs)\b\s*:?\s*$/i;
+  const anyHeading = /^\s*#{1,6}\s|^\s*[A-Z][A-Za-z /]{2,}:\s*$/;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (portsHeading.test(t)) { inPorts = true; continue; }
+    if (anyHeading.test(lines[i]) && !/ports?|signals?|interface|inputs?|outputs?/i.test(t)) inPorts = false;
+    if (!inPorts) continue;
+    const m = lines[i].match(/^[ \t>*\-]*([A-Za-z_]\w*)\s*[:–—-]/);
+    if (m && !PORT_QUALIFIERS.test(m[1])) names[m[1].toLowerCase()] = m[1];
+  }
+  // (b) Real Verilog-style declarations anywhere: the direction keyword MUST be followed by
+  //     a qualifier/width (wire/reg/logic/signed/unsigned/bit or [..]) so English prose like
+  //     "16-bit input representing …" is NOT matched.
+  let m2;
+  const declRe = /\b(?:input|output|inout)\s+(?:wire|reg|logic|signed|unsigned|bit|\[[^\]]*\])[\s\w\[\]:.\-]*?\b([A-Za-z_]\w*)\s*(?=[,;)\n]|$)/gi;
+  while ((m2 = declRe.exec(s))) { if (!PORT_QUALIFIERS.test(m2[1])) names[m2[1].toLowerCase()] = m2[1]; }
+  return names;
+}
+// Names the spec declares but the contract's port list lacks (original casing).
+function missingSpecPorts(specText, contract) {
+  const want = specPortNames(specText);
+  const have = {};
+  ((contract && contract.ports) || []).forEach((p) => { if (p && p.name) have[String(p.name).toLowerCase()] = 1; });
+  const params = {};
+  ((contract && contract.parameters) || []).forEach((p) => { if (p && p.name) params[String(p.name).toLowerCase()] = 1; });
+  return Object.keys(want).filter((k) => !have[k] && !params[k]).map((k) => want[k]);
+}
+
 // Split a generated module into its body (between the header ';' and 'endmodule'),
 // so we can force OUR header and keep only the model's body. Paren-depth aware, so
 // it handles a '#(...)' parameter list. Returns null if it can't be parsed safely.
@@ -333,8 +376,13 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
   const statusRef = manifestReference(manifest);
 
   let lastErr = "";
+  // The forced header is a FIRST-ATTEMPT optimization, not a cage: if the contract dropped
+  // a port the body needs ("Unable to bind wire/reg/memory `x'"), the Builder can't fix it
+  // while locked to that header. So after any compile failure we drop the forced header and
+  // let the Builder rewrite the WHOLE module (header included) on the retry.
+  let effHeader = header;
   for (let attempt = 1; attempt <= maxTries; attempt++) {
-    const sys = (header ?
+    const sys = (effHeader ?
       ("You are a Verilog module writer. You are given the EXACT module header (name, parameters, ports) — " +
        "you MUST reproduce it VERBATIM and NOT change any parameter or port. Write ONLY the module BODY (the " +
        "internal logic) between the header and 'endmodule'. Match the spec's behavior, clock edge, and reset " +
@@ -369,9 +417,9 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       "' — " +
       mod.purpose +
       ".";
-    if (header)
+    if (effHeader)
       user += "\n\nUSE THIS EXACT MODULE HEADER (copy it verbatim; do NOT change any parameter or port):\n" +
-        "```verilog\n" + header + "\n  // write the module body here\nendmodule\n```";
+        "```verilog\n" + effHeader + "\n  // write the module body here\nendmodule\n```";
     if (statusRef) user += statusRef;
     if (depContext)
       user +=
@@ -392,6 +440,16 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
           "and rewrite the state encoding with localparam constants and a plain 'logic [N:0] state, next_state;' " +
           "register — then all your state assignments compile with no casts.";
       }
+      // "Unable to bind wire/reg/memory `x'" = a signal used but never declared — usually a
+      // PORT the header omitted. The header is dropped below, so tell it to declare it.
+      var bindM = String(lastErr).match(/Unable to bind (?:wire\/reg\/memory|parameter)\s+[`']?(\w+)/i);
+      if (bindM) {
+        user +=
+          "\nThe error 'Unable to bind ... `" + bindM[1] + "'' means '" + bindM[1] + "' is USED but never " +
+          "DECLARED. Write the COMPLETE module (you may now define the header yourself) and DECLARE '" + bindM[1] +
+          "': add it to the module's port list with the correct direction and width if the spec lists it as an " +
+          "I/O signal; otherwise declare it as an internal wire/reg.";
+      }
     }
 
     const reply = await callLLM({
@@ -400,10 +458,10 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       messages: [{ role: "user", content: user }],
     });
     let code = extractVerilog(reply);
-    if (header) {
+    if (effHeader) {
       // Force OUR header (guaranteed-correct params/ports) and keep only the body.
       const parts = splitHeaderBody(code);
-      if (parts) code = header + "\n" + parts.body + "\nendmodule";
+      if (parts) code = effHeader + "\n" + parts.body + "\nendmodule";
     }
 
     // Compile-check: this module + every module built so far (all its deps
@@ -432,6 +490,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       return { name: mod.name, code, summary, attempts: attempt, ok: true };
     }
     lastErr = res.output;
+    effHeader = null; // relax the forced header so the retry can rewrite the whole module
   }
   return { name: mod.name, code: null, ok: false, attempts: maxTries, error: lastErr };
 }
@@ -1356,6 +1415,12 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
     try {
       contract = await genInterfaceContract(verifierLLM, spec, mod);
       header = (contract && contract.ports && contract.ports.length) ? buildHeader(mod.name, contract) : null;
+      // #1 cross-check: if the spec plainly names ports the contract DROPPED, don't force an
+      // incomplete header (which would leave a used-but-undeclared signal) — let the Builder
+      // write the whole module from the start.
+      if (header && missingSpecPorts(builderSpec(spec, mod.name), contract).length) {
+        header = null; // let the Builder write the whole module (with the missing port)
+      }
     } catch (e) { header = null; }
     const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest, header);
     if (r.ok) {
