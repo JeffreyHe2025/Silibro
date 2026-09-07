@@ -81,7 +81,6 @@
   var projectNameInput = $("project-name");
   var deleteProjectBtn = $("delete-project");
   var newFileBtn = $("new-file");
-  var detectTopBtn = $("detect-top");
   var importFileBtn = $("import-file");
   var importInput = $("import-input");
   var fileList = $("file-list");
@@ -2739,6 +2738,7 @@
       appendChatMsg("assistant", msg4);
       chatHistory.push({ role: "assistant", content: msg4 });
     }
+    try { autoDesignateTop(); } catch (e) {} // set the top from the build's dependency graph
     if (data.stopped) showContinueButton(); // let the user resume where it left off
     try { await saveConversation(); } catch (e) {}
     try { await linkChatToProject(); } catch (e) {} // link + name this chat after the project it built
@@ -5118,37 +5118,23 @@
   function depGraphFile() {
     return files.find(function (f) { return /^dependency_graph\.md$/i.test(f.name) && (f.code || "").trim(); });
   }
-  function updateTopButton() {
-    if (!detectTopBtn) return;
-    var has = !!depGraphFile();
-    detectTopBtn.disabled = !has;
-    detectTopBtn.title = has
-      ? "Find the top-level module from dependency_graph.md"
-      : "No dependency_graph.md — run Verify & Build to generate one";
-  }
-
-  function detectTopFromGraph() {
-    if (currentProjectId == null) { alert("Open a project first."); return; }
+  // After a build, designate the top-level module automatically from dependency_graph.md
+  // (the module nothing else instantiates) — UNLESS the user has manually starred one.
+  // The user can always override by clicking a file's ☆ star.
+  function autoDesignateTop() {
+    var d = getDeclaredTop();
+    if (d && d.source === "user") return;         // never override a manual choice
     var gf = depGraphFile();
-    if (!gf) { alert("No dependency_graph.md found. Run Verify & Build to generate one."); return; }
+    if (!gf) return;
     var topName = parseTopFromDepGraph(gf.code);
-    if (!topName) {
-      consoleLog("🔎 no single top module in dependency_graph.md (multiple independent roots?)", "warn");
-      alert("Couldn't identify a single top module from the dependency graph.");
-      return;
-    }
+    if (!topName) return;
     var f = fileForModule(topName);
-    if (!f) {
-      consoleLog("🔎 top module '" + topName + "' has no matching Verilog file", "warn");
-      alert("Top module '" + topName + "' (from the graph) has no matching .v file.");
-      return;
-    }
-    setDeclaredTop(f.id, "graph");
+    if (!f) return;
+    if (d && d.id === f.id) return;               // already the top
+    setDeclaredTop(f.id, "build");
     renderFileList();
-    consoleLog("🔎 top module: " + f.name + " (" + topName + ", from dependency_graph.md)", "ok");
+    consoleLog("★ top module set to " + f.name + " (" + topName + ", from the build)", "ok");
   }
-
-  detectTopBtn.addEventListener("click", detectTopFromGraph);
 
   signOutBtn.addEventListener("click", function () { sb.auth.signOut(); });
   (function () { var b = $("add-credits"); if (b) b.addEventListener("click", startTopup); })();
