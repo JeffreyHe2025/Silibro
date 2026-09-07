@@ -890,6 +890,42 @@ async function fixModuleConformance(llm, spec, mod, builtFiles, issues) {
   return null;
 }
 
+// Rewrite a module whose SMOKE baseline FAILED — it compiled but produces undefined (X)
+// outputs, or outputs never change (stuck/undriven). That's a real MODULE bug (an output
+// isn't driven, a register isn't reset/initialized), not a broken testbench. Feeds the
+// current code + smoke markers back to the Builder and compile-checks the result over a
+// few tries. Returns the fixed, compiling code, or null. Same name/ports/params.
+async function fixModuleFromSmoke(llm, spec, mod, builtFiles, markers, prevCode) {
+  const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
+  const depContext = depNames.map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n]).join("\n\n");
+  const sys =
+    "You are a Verilog module writer. Your module COMPILED but a smoke test found a real RUNTIME problem: " +
+    "undefined (X) outputs and/or outputs that never change (stuck/undriven). Fix the MODULE so that: EVERY " +
+    "output is DRIVEN on every path (no undriven signals, no inferred latches → no X); registers are " +
+    "INITIALIZED by the reset (matching the spec's reset type and polarity) so outputs are defined from the " +
+    "first cycle; and combinational outputs are assigned for ALL input combinations. Keep the SAME module name, " +
+    "ports and parameters. Output ONLY the corrected module inside one ```verilog code block — no prose, no " +
+    "testbench." + RESET_REF + IVERILOG_RULES;
+  const base =
+    "Design spec:\n" + builderSpec(spec, mod.name) +
+    "\n\nSmoke test result (what went wrong):\n" + String(markers || "").slice(0, 400) +
+    "\n\nYour current module (it compiles, but produces X / stuck outputs):\n```verilog\n" + (prevCode || "") + "\n```" +
+    (depContext ? "\n\nIt instantiates these already-built modules (do NOT redefine them):\n\n" + depContext : "");
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const user = base + (lastErr ? "\n\nYour previous attempt FAILED to compile:\n" + lastErr + "\n\nReturn a corrected, compiling version." : "");
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const code = extractVerilog(reply);
+    if (!code) { lastErr = "no code produced"; continue; }
+    const files = Object.keys(builtFiles).filter((n) => n !== mod.name).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+    files.push({ name: mod.name + ".v", code });
+    const res = await compileVerilog(files, mod.name);
+    if (res.ok) return code;
+    lastErr = res.output;
+  }
+  return null;
+}
+
 // Attribute a testbench-stage COMPILE error to the testbench or the module.
 // iverilog reports errors as FILE:LINE; the module already compiled independently
 // (buildModule), so an error in the tb file — or ambiguous — is the testbench's
@@ -1530,20 +1566,47 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         entry.synthesizable = synth.synthesizable; // true | false | null (yosys absent)
         entry.synthAvailable = synth.available;
         entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
-        const synthOk = synth.available ? synth.synthesizable === true : true;
-        const structuralOk = lint.clean && synthOk;
+        let synthOk = synth.available ? synth.synthesizable === true : true;
+        let structuralOk = lint.clean && synthOk;
 
         // SMOKE BASELINE on EVERY module (both tiers): a code-generated X-check
         // confirming the module RUNS without producing undefined outputs. It's
         // independent of the LLM oracle, so it gives a reliable "the module itself
         // runs clean" signal used to attribute functional failures (module vs
         // testbench). For smoke-tier modules it's also the verification gate.
-        const smoke = await runSmokeBaseline(r.code, floorFiles);
+        let smoke = await runSmokeBaseline(r.code, floorFiles);
         if (onProgress) onProgress({ type: "check", module: mod.name, name: "smoke", passed: smoke.passed, reason: smoke.markers || "", tier: tier });
         entry.smokeSimPassed = smoke.passed;
         entry.smokeSimOutput = smoke.markers;
         entry.smokeTb = smoke.tb || "";  // code-generated smoke testbench (for the Modules view)
         entry.code = r.code;             // the module's Verilog RTL (for the Modules view)
+
+        // SMOKE-FAILURE FIX (BOTH tiers): if the module compiled but produces X / stuck-
+        // undriven outputs (smoke.passed === false — a REAL module bug, not a broken smoke
+        // testbench, which would be null), send it BACK to the Builder to fix BEFORE the
+        // functional testbench. Re-runs structural + smoke on the corrected code. Bounded
+        // by the shared fix budget.
+        const MAX_SMOKE_FIX = 2;
+        for (let sTry = 1; !stopTests && smoke.passed === false && sTry <= MAX_SMOKE_FIX; sTry++) {
+          chargeBudget(fixBudget);
+          if (onProgress) onProgress({ type: "drill", depth: 0, module: mod.name,
+            msg: "smoke failed (X / stuck outputs) — rebuilding the module (fix " + sTry + "/" + MAX_SMOKE_FIX + ")…" });
+          const fixed = await fixModuleFromSmoke(llm, spec, mod, builtFiles, smoke.markers, r.code);
+          if (!fixed) break; // couldn't produce a compiling fix → fall through to the tier logic
+          builtFiles[mod.name] = fixed; r.code = fixed; entry.code = fixed;
+          const ff = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+          const lint2 = await lintVerilog(ff, mod.name);
+          const synth2 = await synthCheck(ff, mod.name);
+          synthOk = synth2.available ? synth2.synthesizable === true : true;
+          structuralOk = lint2.clean && synthOk;
+          entry.lintClean = lint2.clean; entry.lintOutput = lint2.output ? lint2.output.slice(0, 500) : "";
+          entry.synthesizable = synth2.synthesizable; entry.synthAvailable = synth2.available;
+          entry.synthOutput = synth2.output ? synth2.output.slice(0, 500) : "";
+          smoke = await runSmokeBaseline(fixed, ff);
+          entry.smokeSimPassed = smoke.passed; entry.smokeSimOutput = smoke.markers;
+          if (smoke.tb) entry.smokeTb = smoke.tb;
+          if (onProgress) onProgress({ type: "check", module: mod.name, name: "smoke", passed: smoke.passed, reason: smoke.markers || "", tier: tier, phase: "smokeFix" });
+        }
         const smokeOk = smoke.passed !== false; // fail only on a real X/module failure
 
         if (stopTests) {
