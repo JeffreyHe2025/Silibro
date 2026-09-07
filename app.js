@@ -3249,6 +3249,24 @@
     if (editor) editor.resize(); // let the editor reflow to the new width
   });
 
+  // ---- Theme (dark / light) toggle. The <head> inline script sets data-theme early
+  // (no flash); here we just sync the button icon and wire the click. Persisted in localStorage.
+  var themeToggleBtn = $("theme-toggle");
+  function curTheme() { return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light"; }
+  function applyTheme(t) {
+    t = t === "dark" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("theme", t); } catch (e) {}
+    if (themeToggleBtn) {
+      themeToggleBtn.textContent = t === "dark" ? "☀️" : "🌙";
+      themeToggleBtn.title = t === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    }
+  }
+  applyTheme(curTheme()); // sync the icon with the theme the inline head script already applied
+  if (themeToggleBtn) themeToggleBtn.addEventListener("click", function () {
+    applyTheme(curTheme() === "dark" ? "light" : "dark");
+  });
+
   // ---- AI chat widget (BYOK: OpenRouter, or a direct provider key) ----
   var chatHistory = []; // [{role, content, images?}] RECENT turns of the OPEN conversation
   // Long-chat memory (persisted with the conversation, kept OUT of chatHistory):

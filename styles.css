@@ -1501,3 +1501,126 @@ body.console-resizing, body.console-resizing * {
   opacity: 0; transition: opacity .2s ease, transform .2s ease;
 }
 .tiny-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ============================ DARK MODE ============================ */
+/* Toggled by data-theme="dark" on <html>. Palette: page #0f1419, surfaces #161b22,
+   raised #1f2530, borders #2b313b, text #e6e8eb, muted #9aa4b2. The topbar, console,
+   chat header and Ace editor are already dark and left as-is. */
+.theme-toggle {
+  background: rgba(255,255,255,0.12); color: #e5e7eb; border: none; border-radius: 6px;
+  width: 34px; height: 34px; font-size: 16px; line-height: 1; cursor: pointer;
+  transition: background 0.15s ease;
+}
+.theme-toggle:hover { background: rgba(255,255,255,0.22); }
+
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="dark"] body { background: #0f1419; color: #e6e8eb; }
+
+/* Sidebar / projects / files */
+html[data-theme="dark"] .sidebar { background: #161b22; border-right-color: #2b313b; }
+html[data-theme="dark"] .files-section { border-top-color: #0c1015; }
+html[data-theme="dark"] .sidebar-header { border-bottom-color: #232a35; color: #9aa4b2; }
+html[data-theme="dark"] .context-menu { background: #1f2530; border-color: #2b313b; }
+html[data-theme="dark"] .context-item:hover { background: #3a1f22; }
+html[data-theme="dark"] .project-name-input { color: #e6e8eb; }
+html[data-theme="dark"] .project-name-input:hover { background: #1f2530; }
+html[data-theme="dark"] .project-name-input:focus { background: #0f1419; }
+html[data-theme="dark"] .icon-btn:hover { background: #1f2530; }
+html[data-theme="dark"] .tree-list li { color: #cbd2da; }
+html[data-theme="dark"] .tree-list li:hover { background: #1f2530; }
+html[data-theme="dark"] .tree-list li.active { background: #1e3a5f; color: #bfdbfe; }
+html[data-theme="dark"] .empty-note { color: #6b7480; }
+
+/* Workspace / editor chrome (the Ace editor itself stays its own dark theme) */
+html[data-theme="dark"] .no-project { color: #7a8290; }
+html[data-theme="dark"] .editor-panel { background: #161b22; border-color: #2b313b; }
+html[data-theme="dark"] .editor-toolbar { background: #1f2530; border-bottom-color: #2b313b; }
+html[data-theme="dark"] .project-name { color: #e6e8eb; }
+html[data-theme="dark"] .project-name:hover { background: #262d3a; }
+html[data-theme="dark"] .project-name:focus { background: #0f1419; }
+html[data-theme="dark"] .toolbar-actions .btn { color: #cbd2da; }
+html[data-theme="dark"] .toolbar-actions .btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+html[data-theme="dark"] .toolbar-actions .btn-small { background: rgba(255,255,255,0.07); color: #cbd2da; }
+html[data-theme="dark"] .more-menu { background: #1f2530; border-color: #2b313b; }
+html[data-theme="dark"] .diagram-view, html[data-theme="dark"] .diagram-body { background: #161b22; }
+html[data-theme="dark"] .diagram-toolbar { background: #1f2530; border-bottom-color: #2b313b; color: #cbd2da; }
+html[data-theme="dark"] .output { border-top-color: #2b313b; }
+
+/* Chat panel + history + model bar */
+html[data-theme="dark"] .chat-panel { background: #161b22; border-color: #2b313b; }
+html[data-theme="dark"] body.chat-docked .chat-panel { border-left-color: #2b313b; }
+html[data-theme="dark"] .chat-placeholder,
+html[data-theme="dark"] .chat-setup-label,
+html[data-theme="dark"] .chat-hint,
+html[data-theme="dark"] .chat-history-head,
+html[data-theme="dark"] .chat-model-label,
+html[data-theme="dark"] .saved-key-masked,
+html[data-theme="dark"] #chat-forget-key,
+html[data-theme="dark"] .saved-keys-title { color: #9aa4b2; }
+html[data-theme="dark"] #chat-history-new { color: #9aa4b2 !important; }
+html[data-theme="dark"] .chat-welcome-text { color: #cbd2da; }
+html[data-theme="dark"] .chat-input-row,
+html[data-theme="dark"] .chat-saved-keys-container,
+html[data-theme="dark"] .chat-model-bar { border-top-color: #2b313b; }
+html[data-theme="dark"] .chat-input:disabled { background: #1f2530; }
+html[data-theme="dark"] .chat-attach:hover,
+html[data-theme="dark"] #chat-forget-key:hover { background: #1f2530; }
+html[data-theme="dark"] .saved-key-item { background-color: #1a2029; border-color: #2b313b; }
+html[data-theme="dark"] .saved-key-active { background-color: #14263f; }
+html[data-theme="dark"] .saved-key-provider { color: #e6e8eb; }
+html[data-theme="dark"] .saved-key-actions .btn-small { background: #2b313b; color: #cbd2da; }
+html[data-theme="dark"] .saved-key-actions .btn-small:hover { background: #3a4150; }
+html[data-theme="dark"] .chat-history-list li { color: #cbd2da; }
+html[data-theme="dark"] .chat-history-list li:hover { background: #1f2530; }
+html[data-theme="dark"] .chat-history-list li.active { background: #1e3a5f; }
+html[data-theme="dark"] .chat-history-act { color: #6b7480; }
+html[data-theme="dark"] .chat-history-act:hover { background: #2b313b; }
+
+/* Chat messages / chips */
+html[data-theme="dark"] .chat-msg.assistant { background: #1f2530; color: #e6e8eb; }
+html[data-theme="dark"] .chat-spec-chip { background: #1e253a; border-color: #34406b; color: #c7d2fe; }
+html[data-theme="dark"] .build-controls { background: #1a2029; border-color: #2b313b; }
+
+/* Text inputs */
+html[data-theme="dark"] .chat-input,
+html[data-theme="dark"] .chat-field,
+html[data-theme="dark"] .chat-model-current,
+html[data-theme="dark"] .field input,
+html[data-theme="dark"] .chat-attachment,
+html[data-theme="dark"] .chat-attach,
+html[data-theme="dark"] .modal-select,
+html[data-theme="dark"] .spec-changes { background: #0f1419; color: #e6e8eb; border-color: #2b313b; }
+html[data-theme="dark"] .chat-input::placeholder,
+html[data-theme="dark"] .chat-field::placeholder,
+html[data-theme="dark"] .field input::placeholder { color: #6b7480; }
+
+/* Auth view */
+html[data-theme="dark"] .auth-card { background: #161b22; border-color: #2b313b; }
+html[data-theme="dark"] .auth-card h2, html[data-theme="dark"] #auth-title { color: #e6e8eb; }
+html[data-theme="dark"] .field { color: #cbd2da; }
+html[data-theme="dark"] .auth-toggle, html[data-theme="dark"] .auth-guest a { color: #9aa4b2; }
+html[data-theme="dark"] .auth-guest a:hover { color: #fff; }
+
+/* Modals */
+html[data-theme="dark"] .modal { background: #161b22; color: #e6e8eb; }
+html[data-theme="dark"] .gh-checkbox,
+html[data-theme="dark"] .del-text,
+html[data-theme="dark"] .spec-changes-label { color: #cbd2da; }
+html[data-theme="dark"] .spec-sub { color: #9aa4b2; }
+html[data-theme="dark"] .modal-actions .btn-small { background: #2b313b; color: #cbd2da; }
+html[data-theme="dark"] .spec-text { background: #0f1419; border-color: #2b313b; color: #e6e8eb; }
+
+/* Developer view / tables */
+html[data-theme="dark"] .dev-sub, html[data-theme="dark"] .dev-tab,
+html[data-theme="dark"] .dev-table th, html[data-theme="dark"] .dev-no, html[data-theme="dark"] .dev-empty { color: #9aa4b2; }
+html[data-theme="dark"] .dev-tabs { border-bottom-color: #2b313b; }
+html[data-theme="dark"] .dev-tab:hover { color: #fff; }
+html[data-theme="dark"] .dev-body pre { background: #0f1419; border-color: #2b313b; color: #e6e8eb; }
+html[data-theme="dark"] .dev-table th, html[data-theme="dark"] .dev-table td { border-bottom-color: #232a35; }
+
+/* Modules browser */
+html[data-theme="dark"] .modules-tree { border-color: #2b313b; background: #161b22; }
+html[data-theme="dark"] .modules-detail { border-color: #2b313b; }
+html[data-theme="dark"] .mod-exp { color: #8b949e; }
+html[data-theme="dark"] .mod-detail-meta, html[data-theme="dark"] .mod-tab { color: #e6e8eb; }
+html[data-theme="dark"] #modules-close { color: #e6e8eb !important; }
