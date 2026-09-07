@@ -712,7 +712,9 @@
     });
   }
 
-  function openProject(id) {
+  // skipChatRedirect: set when opening the project as a side-effect of opening one of its
+  // chats (openConversation), so we don't bounce to a DIFFERENT chat than the one clicked.
+  function openProject(id, skipChatRedirect) {
     var p = projects.find(function (x) { return x.id === id; });
     if (!p) return;
     currentProjectId = id;
@@ -723,6 +725,15 @@
     renderProjectChats(); // show the chats linked to this project
     closeEditorPanel();
     loadFiles(id);
+    if (skipChatRedirect) return;
+    // Redirect to one of this project's chats (most recent), or a fresh chat if it has none.
+    var chats = conversations.filter(function (c) { return c.project_id === id; });
+    if (chats.length) {
+      chats.sort(function (a, b) { return String(b.updated_at || "").localeCompare(String(a.updated_at || "")); });
+      if (chats[0].id !== currentConversationId) openConversation(chats[0].id);
+    } else {
+      newChat(); // no chats yet → start a fresh one for this project
+    }
   }
 
   newProjectBtn.addEventListener("click", function () {
@@ -746,6 +757,8 @@
         files = fres.data ? [fres.data] : [];
         renderFileList();
         if (files.length) openFile(files[0].id);
+        newChat();            // a brand-new project starts with a fresh chat
+        renderProjectChats(); // (empty until the first prompt links a chat)
       });
     });
   });
@@ -3631,9 +3644,10 @@
     // Restore long-chat memory (summary/facts/archive) + the recent turns.
     chatHistory = loadPersistedMessages(res.data.messages);
     // One chat ↔ one project: open the linked project so its files are in context.
+    // skipChatRedirect=true so opening the project doesn't bounce us to a different chat.
     if (res.data.project_id && res.data.project_id !== currentProjectId &&
         projects.some(function (p) { return p.id === res.data.project_id; })) {
-      openProject(res.data.project_id);
+      openProject(res.data.project_id, true);
     }
     renderConversation();
     renderProjectChats(); // reflect the active chat in the project's chat list
