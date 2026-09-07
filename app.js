@@ -801,6 +801,33 @@
   function hideDeleteToast() {
     if (deleteToastEl) { deleteToastEl.remove(); deleteToastEl = null; }
   }
+
+  // Copy text to the clipboard (Clipboard API, with a hidden-textarea fallback).
+  function copyText(text) {
+    text = text || "";
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); return true; }
+    } catch (e) {}
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0"; ta.style.left = "-9999px";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta); return true;
+    } catch (e) { return false; }
+  }
+
+  // Small transient "toast" (auto-dismisses ~2s) — e.g. "Copied".
+  function showTinyToast(message) {
+    var t = document.createElement("div");
+    t.className = "tiny-toast";
+    t.textContent = message;
+    document.body.appendChild(t);
+    void t.offsetWidth; t.classList.add("show");
+    setTimeout(function () {
+      t.classList.remove("show");
+      setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 250);
+    }, 1900);
+  }
   function commitPendingProjectDelete() {
     if (!pendingProjectDelete) return;
     var pd = pendingProjectDelete;
@@ -2362,7 +2389,9 @@
     ncBtn.className = "btn"; ncBtn.textContent = "✎ Start new chat";
     ncBtn.addEventListener("click", function () {
       if (ncWrap.parentNode) ncWrap.parentNode.removeChild(ncWrap);
-      startNewProjectContext();
+      copyText(promptText);                      // copy the prompt so it can be pasted
+      startNewProjectContext();                  // open the fresh chat
+      showTinyToast("📋 Copied — paste it into the new chat");
     });
     ncWrap.appendChild(ncBtn);
     chatConversation.appendChild(ncWrap);
