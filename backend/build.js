@@ -677,7 +677,13 @@ const VERILATOR_TB_RULES =
   "- Use ONLY $display / $write / $finish. Do NOT use $dumpfile/$dumpvars, $random/$urandom, force/release, " +
   "wait, fork/join, $fopen/$fscanf/file I/O, or $value$plusargs.\n" +
   "- Use deterministic, hard-coded stimulus (fixed input vectors), not random values.\n" +
-  "- Don't rely on X/Z ('x'/'z') comparisons; compare concrete values only.";
+  "- Don't rely on X/Z ('x'/'z') comparisons; compare concrete values only.\n" +
+  "- Keep the testbench SIMPLE and LINEAR: use ONE initial block that applies each input vector in sequence " +
+  "(with '#' delays) and checks the output right after driving it. Do NOT build a state machine / FSM (no " +
+  "state/next_state regs, no case(state)) inside the testbench to sequence the checks — a linear list of " +
+  "drive-then-check steps is what's wanted.\n" +
+  "- Only declare and drive a clock if the module under test ACTUALLY has a clock port; a purely combinational " +
+  "module (no clock port) needs no clock, no reset, and no FSM — just drive inputs and check outputs after a '#' delay.";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
@@ -1065,7 +1071,7 @@ async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, prob
   const user =
     "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
     "\n\nThe PROBLEM with your testbench (a compile error with the exact line(s), or it ran but printed no FUNC_PASS/FUNC_FAIL):\n" +
-    String(problem || "").slice(0, 2600) +
+    String(problem || "").slice(0, 4200) +
     "\n\nYour previous (broken) testbench:\n```verilog\n" + prevCode + "\n```" +
     "\n\nDesign specification (source of truth for expected outputs):\n" + spec;
   const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
@@ -1109,6 +1115,15 @@ async function funcTest(vllm, spec, entry, builtFiles) {
       }
       problem = "COMPILE ERROR from iverilog (fix the EXACT line(s) flagged below):\n" + String(sim.output || "").slice(0, 700) +
         numberedSourceForRetry(ftb.code, sim.output, "func_tb", "testbench");
+      // iverilog's bare "syntax error"/"Malformed statement" carries no token info, so
+      // the LLM can't tell what to change and keeps regenerating the same broken code.
+      // Enrich with Verilator's precise parser diagnostic ("unexpected X, expecting Y").
+      if (/syntax error|Malformed statement/i.test(sim.output || "")) {
+        try {
+          const vl = await verilatorLint(simFiles, ftb.top);
+          if (vl) problem += "\n\nVerilator's PRECISE diagnostic for the same testbench (use this to find the illegal token/construct):\n" + vl;
+        } catch (e) {}
+      }
     } else {
       const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
       if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
