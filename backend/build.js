@@ -14,11 +14,20 @@ const { parseInterface, genSmokeTestbench } = require("./smoketb");
 
 // Pull the Verilog out of a ```verilog / ```systemverilog / ```file:... block
 // (or fall back to the whole reply).
+// Rewrite the ILLEGAL "size'base-digits" negative literal (e.g. 16'd-1) that LLMs emit
+// for signed inputs into the legal negated form (-16'd1). Icarus is lenient about it
+// but Verilator rejects it ("Number is missing value digits"), which breaks the
+// coverage build. Deterministic; only touches that exact malformed pattern (leaves
+// subtraction like "16'd5 - 1" and already-correct "-16'd1" alone).
+function fixNegSizedLiterals(code) {
+  return String(code || "").replace(/(\d+)'(s?[bodh])\s*-\s*([0-9a-f_]+)/gi, "-$1'$2$3");
+}
+
 function extractVerilog(text) {
   const m = (text || "").match(
     /```(?:verilog|systemverilog|file:[^\n]*)?\r?\n([\s\S]*?)```/i
   );
-  return (m ? m[1] : text || "").trim();
+  return fixNegSizedLiterals((m ? m[1] : text || "").trim());
 }
 
 // Dependencies before dependents. Returns { order, cycle }.
@@ -678,6 +687,9 @@ const VERILATOR_TB_RULES =
   "wait, fork/join, $fopen/$fscanf/file I/O, or $value$plusargs.\n" +
   "- Use deterministic, hard-coded stimulus (fixed input vectors), not random values.\n" +
   "- Don't rely on X/Z ('x'/'z') comparisons; compare concrete values only.\n" +
+  "- For a NEGATIVE value, put the minus sign BEFORE the sized literal: write `-16'd1`, `-8'd4` (or just " +
+  "`x = -1;` into a signed reg). NEVER write `16'd-1` / `8'd-4` — the digits must follow the base, and Verilator " +
+  "rejects the digit-after-minus form.\n" +
   "- Keep the testbench SIMPLE and LINEAR: use ONE initial block that applies each input vector in sequence " +
   "(with '#' delays) and checks the output right after driving it. Do NOT build a state machine / FSM (no " +
   "state/next_state regs, no case(state)) inside the testbench to sequence the checks — a linear list of " +
@@ -1791,22 +1803,47 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
             // DISPLAY-ONLY — not fed back to the Verifier). Best-effort: never blocks.
             if (entry.funcTb) {
               if (onProgress) onProgress({ type: "coverageStart", module: mod.name });
-              try {
-                const covFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
-                covFiles.push({ name: "cov_tb.v", code: entry.funcTb });
-                const covTop = tbTopName(entry.funcTb, mod.name);
-                const cov = await runVerilatorCoverage(covFiles, covTop, mod.name);
-                entry.coverage = cov;
-                // Server-side log so the real cause is visible in `pm2 logs` even when
-                // the Amplify frontend hasn't been rebuilt to render `output`.
-                if (!cov.ran) {
-                  console.log("[coverage] " + mod.name + " (top=" + covTop + "): " + (cov.reason || "failed"));
-                  if (cov.output) console.log("[coverage] " + mod.name + " verilator output:\n" + cov.output);
+              // A testbench can be Icarus-valid yet Verilator-invalid (Verilator is
+              // stricter), so the coverage build fails with an error the funcTest loop
+              // never saw. Feed Verilator's EXACT error back to repair the oracle
+              // testbench and retry coverage. Bounded by the shared fix budget.
+              const MAX_COV_FIX = 2;
+              for (let covTry = 0; covTry <= MAX_COV_FIX; covTry++) {
+                try {
+                  const covFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+                  covFiles.push({ name: "cov_tb.v", code: entry.funcTb });
+                  const covTop = tbTopName(entry.funcTb, mod.name);
+                  const cov = await runVerilatorCoverage(covFiles, covTop, mod.name);
+                  entry.coverage = cov;
+                  // Server-side log so the real cause is visible in `pm2 logs` even when
+                  // the Amplify frontend hasn't been rebuilt to render `output`.
+                  if (!cov.ran) {
+                    console.log("[coverage] " + mod.name + " (top=" + covTop + "): " + (cov.reason || "failed"));
+                    if (cov.output) console.log("[coverage] " + mod.name + " verilator output:\n" + cov.output);
+                  }
+                  // Fixable only when Verilator IS present but the TESTBENCH build failed
+                  // (not a missing/old Verilator, not a module-attributed error).
+                  const fixable = cov.available !== false && cov.ran === false && cov.output &&
+                    attributeCompile(cov.output, "cov_tb.v") === "testbench" &&
+                    covTry < MAX_COV_FIX && !shouldStop();
+                  if (fixable) {
+                    chargeBudget(fixBudget);
+                    console.log("[coverageFix] " + mod.name + " (fix " + (covTry + 1) + "/" + MAX_COV_FIX + ") verilator error:\n" + String(cov.output).slice(0, 400));
+                    if (onProgress) onProgress({ type: "drill", depth: 0, module: mod.name,
+                      msg: "coverage build failed — sending Verilator's exact error back to fix the testbench (fix " + (covTry + 1) + "/" + MAX_COV_FIX + ")…" });
+                    const problem = "Verilator FAILED to build this testbench for coverage (Icarus may accept it, but " +
+                      "Verilator is stricter). Fix ONLY the testbench so Verilator can build it — keep the same checks " +
+                      "and verdict prints. Exact Verilator error (with line numbers):\n" + String(cov.output).slice(0, 1400);
+                    const repaired = await repairFunctionalTestbench(verifierLLM, { name: mod.name, purpose: mod.purpose }, spec, entry.summary || {}, entry.funcTb, problem);
+                    if (repaired && repaired.code) { entry.funcTb = repaired.code; continue; } // retry coverage with the fixed tb
+                  }
+                  if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason, output: cov.output });
+                  break; // ran, or not fixable, or out of tries
+                } catch (e) {
+                  entry.coverage = { available: true, ran: false, reason: String((e && e.message) || e) };
+                  if (onProgress) onProgress({ type: "coverage", module: mod.name, available: true, ran: false, reason: entry.coverage.reason });
+                  break;
                 }
-                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason, output: cov.output });
-              } catch (e) {
-                entry.coverage = { available: true, ran: false, reason: String((e && e.message) || e) };
-                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: true, ran: false, reason: entry.coverage.reason });
               }
             }
           } else {
