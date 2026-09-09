@@ -994,6 +994,42 @@ async function fixModuleFromSmoke(llm, spec, mod, builtFiles, markers, prevCode)
   return null;
 }
 
+// Rebuild a module that COMPILES but FAILS LINT — e.g. a for-loop step that isn't a
+// simple +/- (Verilator can't unroll it for coverage), an inferred latch, or a width
+// issue. Feeds the exact lint output (file:line) back so the builder fixes the flagged
+// construct, keeping the interface + behavior. Returns compiling code or null.
+async function fixModuleFromLint(llm, spec, mod, builtFiles, lintOutput, prevCode) {
+  const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
+  const depContext = depNames.map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n]).join("\n\n");
+  const sys =
+    "You are a Verilog module writer. Your module COMPILES but the linter flagged issue(s) that must be fixed for " +
+    "it to be cleanly SYNTHESIZABLE and to build under Verilator (needed for coverage). Rewrite the MODULE to " +
+    "eliminate EVERY flagged issue at the reported line(s), keeping the SAME module name, ports, parameters and the " +
+    "SAME behavior. In particular, if a 'for' loop is flagged: its step MUST be a simple 'i = i + 1' or 'i = i - 1' " +
+    "with STATIC bounds so the tool can unroll it — move any shift/multiply/division into the loop BODY, never the " +
+    "loop step (e.g. rewrite `for (n=W; n>0; n=n>>1)` as a counted `for (k=0; k<COUNT; k=k+1)` and derive the " +
+    "shifted value inside). Also drive every output on every path (no inferred latches) and size all literals. " +
+    "Output ONLY the corrected module inside one ```verilog code block — no prose, no testbench." + RESET_REF + IVERILOG_RULES;
+  const base =
+    "Design spec:\n" + builderSpec(spec, mod.name) +
+    "\n\nLINT ERROR(S) to fix (exact tool output, with line numbers):\n" + String(lintOutput || "").slice(0, 700) +
+    "\n\nYour current module (it compiles, but has the lint issue(s) above):\n```verilog\n" + (prevCode || "") + "\n```" +
+    (depContext ? "\n\nIt instantiates these already-built modules (do NOT redefine them):\n\n" + depContext : "");
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const user = base + (lastErr ? "\n\nYour previous attempt FAILED to compile:\n" + lastErr + "\n\nReturn a corrected, compiling version." : "");
+    const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
+    const code = extractVerilog(reply);
+    if (!code) { lastErr = "no code produced"; continue; }
+    const files = Object.keys(builtFiles).filter((n) => n !== mod.name).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+    files.push({ name: mod.name + ".v", code });
+    const res = await compileVerilog(files, mod.name);
+    if (res.ok) return code;
+    lastErr = res.output;
+  }
+  return null;
+}
+
 // Attribute a testbench-stage COMPILE error to the testbench or the module.
 // iverilog reports errors as FILE:LINE; the module already compiled independently
 // (buildModule), so an error in the tb file — or ambiguous — is the testbench's
@@ -1630,9 +1666,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
 
         // STRUCTURAL checks on EVERY module (both tiers) — lint + GENERIC SYNTHESIS.
         // Synthesizability is universal, so it runs for all built modules. $0, local.
-        const lint = await lintVerilog(floorFiles, mod.name);
+        let lint = await lintVerilog(floorFiles, mod.name);
         if (onProgress) onProgress({ type: "check", module: mod.name, name: "lint", ok: lint.clean === true, reason: lint.output ? String(lint.output).split("\n")[0] : "" });
-        const synth = await synthCheck(floorFiles, mod.name);
+        let synth = await synthCheck(floorFiles, mod.name);
         if (onProgress) onProgress({ type: "check", module: mod.name, name: "synth", synthesizable: synth.synthesizable, available: synth.available, reason: synth.output ? String(synth.output).split("\n")[0] : "" });
         entry.lintClean = lint.clean;
         entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
@@ -1641,6 +1677,33 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
         let synthOk = synth.available ? synth.synthesizable === true : true;
         let structuralOk = lint.clean && synthOk;
+
+        // LINT-FAILURE FIX (BOTH tiers): a module can compile yet fail lint with a
+        // synthesis-blocking construct — e.g. a for-loop step that isn't a simple +/-,
+        // which Verilator can't unroll for coverage. That would silently mark the module
+        // structurally not-ok and skip the functional test + coverage. Instead, send the
+        // EXACT lint error (with line numbers) BACK to the Builder to fix, then re-lint/
+        // synth. Bounded by the shared fix budget.
+        const MAX_LINT_FIX = 2;
+        for (let lTry = 1; !stopTests && !shouldStop() && lint.clean === false && lTry <= MAX_LINT_FIX; lTry++) {
+          chargeBudget(fixBudget);
+          console.log("[lintFix] " + mod.name + " (fix " + lTry + "/" + MAX_LINT_FIX + ") sending lint error back to builder:\n" + String(entry.lintOutput || "").slice(0, 400));
+          if (onProgress) onProgress({ type: "drill", depth: 0, module: mod.name,
+            msg: "lint flagged an issue — sending it back to the builder with the exact error + line (fix " + lTry + "/" + MAX_LINT_FIX + ")…" });
+          const fixed = await fixModuleFromLint(llm, spec, mod, builtFiles, entry.lintOutput, r.code);
+          if (!fixed) break; // couldn't produce a compiling fix → keep the lint state and fall through
+          builtFiles[mod.name] = fixed; r.code = fixed; entry.code = fixed;
+          const ff = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+          lint = await lintVerilog(ff, mod.name);
+          synth = await synthCheck(ff, mod.name);
+          synthOk = synth.available ? synth.synthesizable === true : true;
+          structuralOk = lint.clean && synthOk;
+          entry.lintClean = lint.clean; entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
+          entry.synthesizable = synth.synthesizable; entry.synthAvailable = synth.available;
+          entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
+          if (onProgress) onProgress({ type: "check", module: mod.name, name: "lint", ok: lint.clean === true, reason: lint.output ? String(lint.output).split("\n")[0] : "", phase: "lintFix" });
+          if (onProgress) onProgress({ type: "check", module: mod.name, name: "synth", synthesizable: synth.synthesizable, available: synth.available, reason: synth.output ? String(synth.output).split("\n")[0] : "", phase: "lintFix" });
+        }
 
         // SMOKE BASELINE on EVERY module (both tiers): a code-generated X-check
         // confirming the module RUNS without producing undefined outputs. It's
