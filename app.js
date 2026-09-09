@@ -3624,10 +3624,10 @@
   }
 
   function setConnectedButtons(show) {
-    // History + New stay available even with no key so you can view past chats
-    // (and start a fresh one) — you just can't SEND until a key is connected.
+    // New stays available even with no key so you can start a fresh chat — you just
+    // can't SEND until a key is connected. (The global Chats list was removed; chats
+    // are organized per-project instead.)
     chatNew.classList.remove("hidden");
-    chatHistoryBtn.classList.remove("hidden");
   }
 
   function showKeySetup() {
@@ -4640,7 +4640,7 @@
   chatClose.addEventListener("click", closeChat);
   chatNew.addEventListener("click", newChat);
   if (chatHistoryNew) chatHistoryNew.addEventListener("click", newChat);
-  chatHistoryBtn.addEventListener("click", function () {
+  if (chatHistoryBtn) chatHistoryBtn.addEventListener("click", function () {
     if (chatHistoryView.classList.contains("hidden")) showHistory();
     else showConversation();
   });
