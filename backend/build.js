@@ -536,6 +536,10 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
           .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
         lintFiles.push({ name: mod.name + ".v", code: code });
         vlintHint = await verilatorLint(lintFiles, mod.name);
+        // Make it visible in the console that we enriched the bare "syntax error".
+        if (onAttempt) onAttempt({ type: "drill", depth: 0, module: mod.name, msg: vlintHint
+          ? "iverilog only said 'syntax error' — got a precise diagnostic from Verilator for the next attempt"
+          : "iverilog only said 'syntax error' — Verilator had no extra detail (or isn't installed)" });
       } catch (e) { vlintHint = ""; }
     }
 
