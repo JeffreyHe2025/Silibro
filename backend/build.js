@@ -363,30 +363,26 @@ function splitHeaderBody(code) {
   return { body: code.slice(headerEnd + 1, endIdx).trim() };
 }
 
-// Show the Builder the EXACT source lines the compiler flagged, numbered and marked, so it
-// doesn't have to guess which line the error's ":N:" refers to (the compiled file may
-// include the forced header, shifting numbers). General — works for any error that cites
-// "<module>.v:<N>:". Prints each flagged line (with one line of context) from the compiled code.
-function annotateErrorLines(code, errText, modName) {
+// Show the Builder its ENTIRE compiled module with EVERY line numbered, so the error's
+// ":N:" line references map exactly (the compiled file may include the forced header,
+// shifting numbers) and the model can see the whole file it's fixing. Lines the compiler
+// flagged are marked ">>>". General — works for any error that cites "<module>.v:<N>:".
+function numberedSourceForRetry(code, errText, modName) {
   const lines = String(code || "").split("\n");
+  if (!code || !lines.length) return "";
   const esc = String(modName || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(esc + "\\.v:(\\d+):", "gi");
-  const nums = {}; let m;
-  while ((m = re.exec(String(errText || "")))) nums[parseInt(m[1], 10)] = 1;
-  const keys = Object.keys(nums).map(Number).filter((n) => n >= 1 && n <= lines.length).sort((a, b) => a - b);
-  if (!keys.length) return "";
-  const shown = {}, out = [];
-  keys.forEach((n) => {
-    for (let i = n - 1; i <= n + 1; i++) {
-      if (i >= 1 && i <= lines.length && !shown[i]) {
-        shown[i] = 1;
-        out.push((i === n ? ">>> " : "    ") + i + " | " + lines[i - 1]);
-      }
-    }
-  });
-  return out.length
-    ? "\n\nThese are the exact lines of YOUR module the compiler flagged (>>> marks the error line):\n```\n" + out.join("\n") + "\n```"
-    : "";
+  const flagged = {}; let m;
+  while ((m = re.exec(String(errText || "")))) flagged[parseInt(m[1], 10)] = 1;
+  const width = String(lines.length).length;
+  const body = lines.map((ln, i) => {
+    const n = i + 1;
+    let num = String(n);
+    while (num.length < width) num = " " + num;
+    return (flagged[n] ? ">>>" : "   ") + num + " | " + ln;
+  }).join("\n");
+  return "\n\nThis is EXACTLY the module you compiled, with line numbers matching the error above " +
+    "(>>> marks a flagged line):\n```\n" + body + "\n```";
 }
 
 // Step 3: build one module, compile-checking it (with retries).
@@ -456,7 +452,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       user +=
         "\n\nYour previous version FAILED to compile. Here is the FULL Icarus Verilog error — FIX THIS:\n" +
         "```\n" + lastErr + "\n```" +
-        annotateErrorLines(prevCode, lastErr, mod.name) +
+        numberedSourceForRetry(prevCode, lastErr, mod.name) +
         "\n\nRead the error above, find the exact cause, and return a corrected, COMPILING version of module '" +
         mod.name + "' that resolves every error shown.";
     }
