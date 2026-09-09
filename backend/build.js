@@ -9,7 +9,7 @@
 // (all the modules it instantiates already exist and have compiled).
 
 const { callLLM } = require("./llm");
-const { compileVerilog, lintVerilog, synthCheck, runTestbench, runVerilatorCoverage } = require("./compile");
+const { compileVerilog, lintVerilog, synthCheck, runTestbench, runVerilatorCoverage, verilatorLint } = require("./compile");
 const { parseInterface, genSmokeTestbench } = require("./smoketb");
 
 // Pull the Verilog out of a ```verilog / ```systemverilog / ```file:... block
@@ -401,6 +401,10 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
 
   let lastErr = "";
   let prevCode = ""; // the code that produced lastErr, so we can point the Builder at the flagged lines
+  let vlintHint = ""; // precise Verilator diagnostic when iverilog only says "syntax error"
+  let sameErr = 0, lastErrKey = ""; // stuck-detection: how many times the SAME error repeated
+  const REWRITE_AT = 4;  // after this many identical errors, tell it to rewrite from scratch
+  const STUCK_LIMIT = 10; // after this many identical errors, give up (not converging)
   // The forced header is a FIRST-ATTEMPT optimization, not a cage: if the contract dropped
   // a port the body needs ("Unable to bind wire/reg/memory `x'"), the Builder can't fix it
   // while locked to that header. So after any compile failure we drop the forced header and
@@ -461,6 +465,18 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
         numberedSourceForRetry(prevCode, lastErr, mod.name) +
         "\n\nRead the error above, find the exact cause, and return a corrected, COMPILING version of module '" +
         mod.name + "' that resolves every error shown.";
+      // iverilog's bare "syntax error" carries no detail; give the Builder Verilator's
+      // precise diagnostic (right token, right line) so it's actually actionable.
+      if (vlintHint) {
+        user += "\n\nIcarus Verilog only reported \"syntax error\". Verilator's parser is more precise — use " +
+          "this to pinpoint the exact token/line:\n```\n" + vlintHint + "\n```";
+      }
+      // Not converging (same error over and over) → stop tweaking, rewrite from scratch.
+      if (sameErr >= REWRITE_AT) {
+        user += "\n\nYou have produced the SAME error " + sameErr + " times — tweaking is not working. Do NOT edit " +
+          "the previous version; REWRITE the module from scratch with a simpler, conventional structure that " +
+          "avoids whatever construct triggers this error.";
+      }
     }
 
     const reply = await callLLM({
@@ -503,6 +519,27 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
     lastErr = res.output;
     prevCode = code; // remember what was compiled so the retry can be shown the flagged lines
     effHeader = null; // relax the forced header so the retry can rewrite the whole module
+
+    // Stuck-detection: count how many times the SAME error repeats (paths stripped so temp
+    // dirs don't make each look unique). Varied errors reset it, so genuine progress keeps
+    // retrying; only a truly stuck loop trips REWRITE_AT / STUCK_LIMIT.
+    let errKey = (String(res.output || "").split("\n").filter((l) => /error|sorry/i.test(l))[0] ||
+      String(res.output || "").split("\n")[0] || "").replace(/\/\S*vbuild-\S+/g, "").replace(/:\d+:/g, ":N:").trim();
+    if (errKey && errKey === lastErrKey) sameErr++; else { sameErr = 1; lastErrKey = errKey; }
+
+    // Bare "syntax error" (no named cause) → iverilog is unhelpful; get Verilator's precise
+    // diagnostic for the next retry's prompt.
+    vlintHint = "";
+    if (/\bsyntax error\b/i.test(lastErr) && !/sorry:|Unable to bind|explicit cast/i.test(lastErr)) {
+      try {
+        const lintFiles = Object.keys(builtFiles).filter((n) => n !== mod.name)
+          .map((n) => ({ name: n + ".v", code: builtFiles[n] }));
+        lintFiles.push({ name: mod.name + ".v", code: code });
+        vlintHint = await verilatorLint(lintFiles, mod.name);
+      } catch (e) { vlintHint = ""; }
+    }
+
+    if (sameErr >= STUCK_LIMIT) break; // identical error too many times → not converging, give up
   }
   return { name: mod.name, code: null, ok: false, attempts: attempt, error: lastErr };
 }
@@ -626,6 +663,17 @@ const IVERILOG_RULES =
   "with an `if`, or set a flag and stop updating once it's set. For priority/first-match logic, iterate high\u2192low " +
   "(or low\u2192high) and use `if (!found) ...`.\n" +
   "- Declare every signal before use \u2014 no undeclared identifiers, no implicit nets, no SystemVerilog casts.";
+
+// Extra rules for the ORACLE TESTBENCH so it runs under BOTH Icarus Verilog AND Verilator
+// (Verilator runs it for line coverage). Without these the coverage build fails.
+const VERILATOR_TB_RULES =
+  "\n\nRUNNABLE BY VERILATOR TOO (it runs this testbench for coverage), not only Icarus Verilog:\n" +
+  "- Generate the clock and stimulus with simple '#' delays inside initial/always blocks, and ALWAYS call " +
+  "$finish at the very end so the run terminates.\n" +
+  "- Use ONLY $display / $write / $finish. Do NOT use $dumpfile/$dumpvars, $random/$urandom, force/release, " +
+  "wait, fork/join, $fopen/$fscanf/file I/O, or $value$plusargs.\n" +
+  "- Use deterministic, hard-coded stimulus (fixed input vectors), not random values.\n" +
+  "- Don't rely on X/Z ('x'/'z') comparisons; compare concrete values only.";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
   if (features && features.hasComputation) return "functional"; // computes data → needs an oracle
@@ -754,7 +802,7 @@ async function genFunctionalTestbench(llm, mod, spec, summary) {
     "(5) on a mismatch, print a line starting with 'FUNC_FAIL' including inputs, expected, and actual; " +
     "(6) at the very end, print 'FUNC_PASS' only if every check passed; (7) call $finish. " +
     "Name the testbench module 'tb_" + mod.name + "'. Output ONLY the testbench inside a ```verilog code block — " +
-    "no prose, and do NOT include the module under test." + IVERILOG_RULES;
+    "no prose, and do NOT include the module under test." + IVERILOG_RULES + VERILATOR_TB_RULES;
   const user =
     "Module under test: " + mod.name + "\n" +
     "Ports: " + JSON.stringify(ports) + "\n" +
@@ -969,7 +1017,7 @@ async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, prob
     "inputs/expected/actual) on any mismatch, print 'FUNC_PASS' at the very end only if every check passed, then " +
     "call $finish so the simulation cannot hang. Do NOT modify or redefine the module under test. Name the " +
     "testbench 'tb_" + mod.name + "'. Output ONLY the corrected testbench inside a ```verilog code block — no " +
-    "prose, no module under test." + IVERILOG_RULES;
+    "prose, no module under test." + IVERILOG_RULES + VERILATOR_TB_RULES;
   const user =
     "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
     "\n\nThe PROBLEM with your testbench (a compile error, or it ran but printed no FUNC_PASS/FUNC_FAIL):\n" +

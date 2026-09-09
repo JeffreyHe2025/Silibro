@@ -635,4 +635,27 @@ async function runVerilatorCoverage(files, tbTop, moduleName) {
   }
 }
 
-module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, synthesizeProject, findTopDesignModule, runTestbench, runVerilatorCoverage };
+// Verilator syntax lint for a MODULE — used to turn iverilog's useless bare "syntax error"
+// into a precise, actionable message (Verilator's parser says "unexpected X, expecting Y"
+// with the right line). Best-effort: returns "" if Verilator is absent or has nothing useful.
+async function verilatorLint(files, topModule) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vlint-"));
+  try {
+    const names = files.map((fl) => { fs.writeFileSync(path.join(dir, fl.name), fl.code || ""); return fl.name; });
+    const args = ["--lint-only", "-Wno-lint", "-Wno-fatal", "--timing", "--quiet"];
+    if (topModule) args.push("--top-module", topModule);
+    try {
+      await pexecFile("verilator", args.concat(names), { cwd: dir, timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+      return ""; // lint-clean → nothing to add (the real problem is elsewhere)
+    } catch (e) {
+      if (e && e.code === "ENOENT") return ""; // Verilator not installed
+      const out = String((e.stderr || e.stdout || e.message || "")).trim();
+      // Keep the %Error lines (the useful diagnostics); cap size.
+      const errLines = out.split("\n").filter((l) => /%(Error|Warning)/.test(l));
+      return (errLines.length ? errLines.join("\n") : out).slice(0, 1200);
+    }
+  } catch (e) { return ""; }
+  finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} }
+}
+
+module.exports = { compileVerilog, compileReport, lintVerilog, synthCheck, synthesizeProject, findTopDesignModule, runTestbench, runVerilatorCoverage, verilatorLint };
