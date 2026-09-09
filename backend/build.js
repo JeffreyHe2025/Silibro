@@ -1707,7 +1707,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
                 const covTop = tbTopName(entry.funcTb, mod.name);
                 const cov = await runVerilatorCoverage(covFiles, covTop, mod.name);
                 entry.coverage = cov;
-                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason });
+                if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason, output: cov.output });
               } catch (e) {
                 entry.coverage = { available: true, ran: false, reason: String((e && e.message) || e) };
                 if (onProgress) onProgress({ type: "coverage", module: mod.name, available: true, ran: false, reason: entry.coverage.reason });

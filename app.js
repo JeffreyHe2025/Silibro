@@ -2228,6 +2228,8 @@
     var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = tid; // per-project build (routing + Stop)
     var bubble = appendChatMsg("assistant", "▶ Resuming build…");
     showStopButton();
+    try { await linkChatToProject(); } catch (e) {} // persist+link NOW so the chat survives switching away mid-build
+    var cid = currentConversationId;
     try {
       var resp = await fetch(base + "/flow/continue", {
         method: "POST",
@@ -2243,7 +2245,7 @@
         if (/credit/i.test((data && data.error) || "")) onOutOfCredits();
         return;
       }
-      await finishFlowBuild(data);
+      await finishFlowBuild(data, pid, cid);
     } catch (e) {
       bubble.textContent = "⚠ resume error: " + ((e && e.message) || e);
       bubble.classList.add("chat-error");
@@ -2434,6 +2436,8 @@
     var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = tid; // per-project build (routing + Stop)
     bubble.textContent = "✏️ Applying your change — updating the spec and rebuilding only the affected modules…";
     showStopButton();
+    try { await linkChatToProject(); } catch (e) {} // persist+link NOW so the chat survives switching away mid-build
+    var cid = currentConversationId;
     try {
       var resp = await fetch(base + "/flow/continue", {
         method: "POST",
@@ -2452,7 +2456,7 @@
         return;
       }
       if (data.spec) lastFlowSpec = data.spec; // finishFlowBuild saves this to spec.md
-      await finishFlowBuild(data);
+      await finishFlowBuild(data, pid, cid);
       refreshCredits();
     } catch (e) {
       bubble.textContent = "⚠ edit error: " + ((e && e.message) || e);
@@ -2475,6 +2479,8 @@
       activeBuildThreadId = flowThreadId;
       var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = flowThreadId; // per-project build
       showStopButton();
+      try { await linkChatToProject(); } catch (e) {} // persist+link NOW so the chat survives switching away mid-build
+      var cid = currentConversationId;
     } else {
       specModalText.textContent = "Verifier is revising the spec based on your changes…";
     }
@@ -2514,7 +2520,7 @@
       if (!data.done) { showSpecModal(data.spec); return; } // revised spec → review again
       if (!approved) hideSpecModal(); // hide it if it was open during revise
       flowThreadId = null;
-      await finishFlowBuild(data);
+      await finishFlowBuild(data, pid, cid);
       refreshCredits();
     } catch (e) {
       activeBuildThreadId = null; removeBuildControls();
@@ -2552,9 +2558,15 @@
     } else if (ev.type === "coverageStart") {
       consoleLog("   • coverage: running Verilator…", "info");
     } else if (ev.type === "coverage") {
-      if (ev.available === false) consoleLog("   • coverage: skipped (Verilator not installed on the backend)", "warn");
-      else if (!ev.ran) consoleLog("   • coverage: couldn't run" + (ev.reason ? " — " + ev.reason : ""), "warn");
-      else consoleLog("   • coverage: " + (ev.linePercent != null ? ev.linePercent + "% lines executed" : "measured") +
+      if (ev.available === false) consoleLog("   • coverage: skipped — " + (ev.reason || "Verilator not installed on the backend"), "warn");
+      else if (!ev.ran) {
+        consoleLog("   • coverage: couldn't run" + (ev.reason ? " — " + ev.reason : ""), "warn");
+        if (ev.output) { // surface the real Verilator error so the cause is visible, not guessed
+          String(ev.output).split("\n").slice(0, 8).forEach(function (l) {
+            if (l.trim()) consoleLog("       " + l, "warn");
+          });
+        }
+      } else consoleLog("   • coverage: " + (ev.linePercent != null ? ev.linePercent + "% lines executed" : "measured") +
         (ev.hitLines != null ? " (" + ev.hitLines + "/" + ev.totalLines + ")" : ""), "ok");
     } else if (ev.type === "resetFix") {
       consoleLog("🔧 " + ev.module + ": reset auto-corrected in code (async → synchronous, no LLM call)", "ok");
@@ -2708,12 +2720,25 @@
     return out.join("\n");
   }
 
-  async function finishFlowBuild(data) {
-    lastFlowData = data; // capture for the developer view
-    updateDevButton();
-    if (data.stopped) consoleLog("⏹ Build stopped — partial progress saved.", "warn");
-    else consoleLog("✅ Spec approved — Builder finished.", "ok");
-    if (currentProjectId == null) { consoleLog("⚠ Open a project to save the built files.", "error"); return; }
+  async function finishFlowBuild(data, pid, cid) {
+    if (pid === undefined) pid = currentProjectId;
+    if (cid === undefined) cid = currentConversationId;
+    // The user may have opened a different project while this build ran in the
+    // background. When that happens, write results to the project/chat that was
+    // BUILT (pid/cid), never to whatever is on screen now.
+    var away = pid != null && pid !== currentProjectId;
+    var pending = []; // build-result messages to persist to the background chat
+    function say(text, err) {
+      if (away) { pending.push({ role: "assistant", content: text }); return null; }
+      var el = appendChatMsg("assistant", text);
+      if (err && el) el.classList.add("chat-error");
+      chatHistory.push({ role: "assistant", content: text });
+      return el;
+    }
+    if (!away) { lastFlowData = data; updateDevButton(); } // dev view belongs to the open project
+    if (data.stopped) consoleAppend(pid, "⏹ Build stopped — partial progress saved.", "warn");
+    else consoleAppend(pid, "✅ Spec approved — Builder finished.", "ok");
+    if (pid == null) { consoleAppend(pid, "⚠ Open a project to save the built files.", "error"); return; }
     var filesObj = data.files || {};
     var edits = [];
     if (lastFlowSpec) edits.push({ name: "spec.md", content: lastFlowSpec });
@@ -2743,39 +2768,32 @@
       edits.push({ name: /\.s?v$/i.test(n) ? n : n + ".v", content: filesObj[n] });
     });
     if (Object.keys(filesObj).length) {
-      var applied = await applyFileEdits(edits);
+      var applied = await applyFileEditsTo(pid, edits);
       var msg1 = data.stopped
         ? "⏸ Build stopped — saved " + Object.keys(filesObj).length + " module(s) so far: " + applied.join(", ") + ". Click Continue to finish."
         : "🏗 Built " + Object.keys(filesObj).length + " module(s) and saved the spec. Files: " + applied.join(", ");
-      appendChatMsg("assistant", msg1);
-      chatHistory.push({ role: "assistant", content: msg1 });
-
-      if (applied.length < edits.length) {
-        var msg2 = "⚠ Failed to save some files. Check the Console for details.";
-        appendChatMsg("assistant", msg2).classList.add("chat-error");
-        chatHistory.push({ role: "assistant", content: msg2 });
-      }
+      say(msg1);
+      if (applied.length < edits.length) say("⚠ Failed to save some files. Check the Console for details.", true);
       if (data.review) {
-        var msg3 = "🔎 Verifier review (from the module summaries, not the code):\n\n" + data.review;
-        appendChatMsg("assistant", msg3);
-        chatHistory.push({ role: "assistant", content: msg3 });
-        if (reviewFailed(data.review)) offerRefix(); // FAILED → offer a one-click re-fix
+        say("🔎 Verifier review (from the module summaries, not the code):\n\n" + data.review);
+        if (!away && reviewFailed(data.review)) offerRefix(); // FAILED → offer a one-click re-fix
       }
       if (data.dependencyGraph) {
-        var msg5 = "📊 Created dependency_graph.md — open it and click the 📊 Diagram button to view the module dependency graph.";
-        appendChatMsg("assistant", msg5);
-        chatHistory.push({ role: "assistant", content: msg5 });
+        say("📊 Created dependency_graph.md — open it and click the 📊 Diagram button to view the module dependency graph.");
       }
     } else {
-      if (lastFlowSpec) await applyFileEdits(edits); // still save the spec
-      var msg4 = "The build produced no compilable files — check the Console for the module that failed.";
-      appendChatMsg("assistant", msg4);
-      chatHistory.push({ role: "assistant", content: msg4 });
+      if (lastFlowSpec) await applyFileEditsTo(pid, edits); // still save the spec
+      say("The build produced no compilable files — check the Console for the module that failed.");
     }
-    try { autoDesignateTop(); } catch (e) {} // set the top from the build's dependency graph
-    if (data.stopped) showContinueButton(); // let the user resume where it left off
-    try { await saveConversation(); } catch (e) {}
-    try { await linkChatToProject(); } catch (e) {} // link + name this chat after the project it built
+    if (!away) { try { autoDesignateTop(); } catch (e) {} } // set the top from the build's dependency graph
+    if (data.stopped && !away) showContinueButton(); // let the user resume where it left off
+    if (away) {
+      // Fold the results into the background chat so it's intact when the user returns.
+      try { await persistBuildMessagesTo(cid, pid, pending); } catch (e) {}
+    } else {
+      try { await saveConversation(); } catch (e) {}
+      try { await linkChatToProject(); } catch (e) {} // link + name this chat after the project it built
+    }
   }
 
   // Does the Verifier's final review carry a FAILED verdict?
@@ -3955,6 +3973,32 @@
     renderProjectChats();
   }
 
+  // Persist a background build's result messages into a chat the user has navigated
+  // AWAY from — merge them into that chat's stored messages (keeping its memory _meta
+  // record) and make sure it's linked to its project, all without touching the chat
+  // that's on screen. cid may be null if the chat was never saved (safety net).
+  async function persistBuildMessagesTo(cid, pid, msgs) {
+    if (!msgs || !msgs.length) return;
+    if (cid == null) {
+      var proj = projects.find(function (p) { return p.id === pid; });
+      var title = (proj && proj.name) || "Project";
+      var meta = [{ role: "_meta", summary: "", facts: "", archive: [] }];
+      var ins = await dbCreateConversation({ title: title, messages: meta.concat(msgs) });
+      if (!ins.error && ins.data) {
+        try { await dbUpdateConversation(ins.data.id, { project_id: pid }); } catch (e) {}
+        try { await loadConversations(); } catch (e) {}
+      }
+      return;
+    }
+    var res = await dbGetConversation(cid);
+    var existing = (res && res.data && Array.isArray(res.data.messages) && res.data.messages.length)
+      ? res.data.messages : [{ role: "_meta", summary: "", facts: "", archive: [] }];
+    try { await dbUpdateConversation(cid, { project_id: pid, messages: existing.concat(msgs) }); } catch (e) {}
+    var row = conversations.find(function (x) { return x.id === cid; });
+    if (row) row.project_id = pid; else { try { await loadConversations(); } catch (e) {} }
+    renderProjectChats();
+  }
+
   // List the chats linked to the currently-open project in the sidebar (under Files).
   function renderProjectChats() {
     var ul = $("project-chats");
@@ -4490,6 +4534,31 @@
       if (cur) editor.setValue(cur.code || "", -1);
     }
     maybeBackendCompile(applied); // iverilog compile-check on the EC2 backend (if configured)
+    return applied;
+  }
+
+  // Apply file edits to a SPECIFIC project. If it's the project on screen, use the
+  // live path above (updates the visible Files list + editor). Otherwise the user
+  // switched away mid-build, so write straight to that project's rows against a
+  // freshly-loaded file list and leave the current view untouched.
+  async function applyFileEditsTo(pid, edits) {
+    if (pid == null || pid === currentProjectId) return applyFileEdits(edits);
+    var applied = [];
+    var res = await dbListFiles(pid);
+    var pfiles = (res && res.data) || [];
+    for (var i = 0; i < edits.length; i++) {
+      var name = edits[i].name, content = edits[i].content;
+      var existing = pfiles.find(function (f) { return f.name === name; });
+      if (existing) {
+        var u = await dbUpdateFile(existing.id, { name: name, code: content });
+        if (!u.error) { existing.code = content; applied.push(name); }
+        else consoleAppend(pid, "Failed to update " + name + ": " + u.error.message, "error");
+      } else {
+        var c = await dbCreateFile(pid, name, content);
+        if (!c.error) { pfiles.push(c.data); applied.push(name + " (new)"); }
+        else consoleAppend(pid, "Failed to create " + name + ": " + c.error.message, "error");
+      }
+    }
     return applied;
   }
 

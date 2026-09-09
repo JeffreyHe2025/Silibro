@@ -576,11 +576,32 @@ function synthesizeProject(files, opts) {
 // Verilator-compatible, or { ran:true, percent, summary, annotated } on success.
 //   files: [{name, code}] (module + deps + the testbench)  tbTop: testbench top module
 //   moduleName: the DUT module (its annotated source is returned)
+// Get Verilator's major version (5 for "Verilator 5.x", 4 for "4.x", null if absent).
+async function verilatorMajor() {
+  try {
+    const r = await pexecFile("verilator", ["--version"], { timeout: 10000 });
+    const m = /Verilator\s+(\d+)\.(\d+)/i.exec((r.stdout || "") + (r.stderr || ""));
+    return m ? parseInt(m[1], 10) : null;
+  } catch (e) { return null; }
+}
+
 async function runVerilatorCoverage(files, tbTop, moduleName) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vcov-"));
   const cleanup = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} };
   try {
     const names = files.map((fl) => { fs.writeFileSync(path.join(dir, fl.name), fl.code || ""); return fl.name; });
+
+    // Preflight: coverage's --binary flow needs Verilator >= 5.0 AND a C++ toolchain
+    // (it compiles generated C++ with make/g++). Verilator 4.x — what most apt/yum
+    // repos still ship — has no --binary, so EVERY coverage build fails there. Give a
+    // crisp, actionable reason instead of the generic "not Verilator-compatible".
+    const major = await verilatorMajor();
+    if (major === null) { cleanup(); return { available: false, reason: "verilator not installed on the backend" }; }
+    if (major < 5) {
+      cleanup();
+      return { available: false, ran: false,
+        reason: "coverage needs Verilator ≥ 5.0 (for --binary); the backend has Verilator " + major + ".x — ask the admin to upgrade Verilator" };
+    }
 
     // 1) Build a coverage-instrumented simulator. --timing handles #delays / @(edge).
     try {
@@ -592,9 +613,16 @@ async function runVerilatorCoverage(files, tbTop, moduleName) {
       ], { cwd: dir, timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
     } catch (e) {
       if (e && e.code === "ENOENT") { cleanup(); return { available: false, reason: "verilator not installed on the backend" }; }
+      const out = String((e.stderr || e.stdout || e.message || e)).trim();
       cleanup();
-      return { available: true, ran: false, reason: "verilator build failed (design/testbench not Verilator-compatible)",
-        output: String((e.stderr || e.stdout || e.message || e)).slice(0, 1500) };
+      // Distinguish a missing C++ toolchain (make/g++) from Verilog incompatibility —
+      // both surface here as a nonzero verilator exit, but the fixes differ.
+      const toolchain = /make: not found|make: command not found|g\+\+: not found|c\+\+: not found|No such file or directory.*(g\+\+|c\+\+|make)|Exiting due to.*compile error.*obj_dir|error trying to exec/i.test(out);
+      return { available: true, ran: false,
+        reason: toolchain
+          ? "verilator built the model but the C++ toolchain failed (install make + g++/clang on the backend)"
+          : "verilator build failed (design/testbench not Verilator-compatible)",
+        output: out.slice(0, 1800) };
     }
 
     // 2) Run it — writes coverage.dat into the run cwd (the temp dir).
@@ -619,9 +647,13 @@ async function runVerilatorCoverage(files, tbTop, moduleName) {
 
     // Friendlier "lines executed" metric: % of coverage-instrumented lines hit at
     // least once (each annotated line starts with %<count>; %000000 = never hit).
+    // verilator_coverage annotates each coverable line with a flag char ('~' = has
+    // uncovered points, ' ' = all covered) immediately followed by a zero-padded hit
+    // count, e.g. "~000010  if (rst)". Non-coverable lines get a blank count column
+    // (several spaces) then source, so requiring "<flag><digits><space>" excludes them.
     let hitLines = 0, totalLines = 0, linePercent = null;
     annotated.split("\n").forEach((ln) => {
-      const m = /^%(\d+)/.exec(ln);
+      const m = /^[~ ](\d+)\s/.exec(ln);
       if (m) { totalLines++; if (parseInt(m[1], 10) > 0) hitLines++; }
     });
     if (totalLines > 0) linePercent = Math.round((hitLines / totalLines) * 1000) / 10;
