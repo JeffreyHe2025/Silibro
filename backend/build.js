@@ -427,11 +427,10 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
         depContext;
     if (lastErr) {
       user +=
-        "\n\nYour previous version FAILED to compile with Icarus Verilog:\n" +
-        lastErr +
-        "\n\nReturn a corrected version of module '" +
-        mod.name +
-        "'.";
+        "\n\nYour previous version FAILED to compile. Here is the FULL Icarus Verilog error — FIX THIS:\n" +
+        "```\n" + lastErr + "\n```" +
+        "\n\nRead the error above, find the exact cause, and return a corrected, COMPILING version of module '" +
+        mod.name + "' that resolves every error shown.";
       // Targeted hint for the strict-enum error, which the model otherwise keeps
       // reproducing: steer it off SystemVerilog enums entirely.
       if (/explicit cast/i.test(String(lastErr))) {
