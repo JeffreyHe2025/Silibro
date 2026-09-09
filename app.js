@@ -2514,11 +2514,13 @@
       if (ev.ok) {
         consoleLog("✓ " + ev.module + " compiled (attempt " + ev.attempt + ")", "ok");
         resolveRetryLines(ev.module); // recolor this module's earlier orange retries green
-      } else if (ev.attempt < ev.maxTries) {
-        consoleLog("↻ " + ev.module + " attempt " + ev.attempt + "/" + ev.maxTries +
+      } else if (!ev.maxTries || ev.attempt < ev.maxTries) {
+        // maxTries === 0 → unlimited retries (show "attempt N", no cap)
+        var cap = ev.maxTries ? "/" + ev.maxTries : "";
+        consoleLog("↻ " + ev.module + " attempt " + ev.attempt + cap +
           " failed — retrying… " + String(ev.error || "").split("\n")[0], "warn", "retry:" + ev.module);
       }
-      // final-attempt failure is reported by the 'built' event below
+      // final-attempt failure (capped mode only) is reported by the 'built' event below
     } else if (ev.type === "coverageStart") {
       consoleLog("   • coverage: running Verilator…", "info");
     } else if (ev.type === "coverage") {

@@ -389,8 +389,10 @@ function numberedSourceForRetry(code, errText, modName) {
 // onAttempt(ev) (optional) is called after each compile so callers can stream
 // retries live: { type:'attempt', module, attempt, maxTries, ok, error }.
 // manifest (optional) is the whole-design status list, passed as LLM reference.
-async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, manifest, header) {
-  maxTries = maxTries || 3;
+async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, manifest, header, shouldStop) {
+  // maxTries <= 0 (or omitted) means UNLIMITED — keep fixing compile errors until it
+  // compiles (or the user hits Stop). Otherwise cap at maxTries.
+  const unlimited = !maxTries || maxTries < 0;
   const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
   const depContext = depNames
     .map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n])
@@ -404,7 +406,11 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
   // while locked to that header. So after any compile failure we drop the forced header and
   // let the Builder rewrite the WHOLE module (header included) on the retry.
   let effHeader = header;
-  for (let attempt = 1; attempt <= maxTries; attempt++) {
+  let attempt = 0;
+  while (true) {
+    if (shouldStop && shouldStop()) break;      // user hit Stop
+    if (!unlimited && attempt >= maxTries) break;
+    attempt++;
     const sys = (effHeader ?
       ("You are a Verilog module writer. You are given the EXACT module header (name, parameters, ports) — " +
        "you MUST reproduce it VERBATIM and NOT change any parameter or port. Write ONLY the module BODY (the " +
@@ -483,7 +489,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
         type: "attempt",
         module: mod.name,
         attempt: attempt,
-        maxTries: maxTries,
+        maxTries: unlimited ? 0 : maxTries, // 0 → client shows "attempt N" with no cap
         ok: res.ok,
         error: res.ok ? "" : String(res.output || "").slice(0, 300),
       });
@@ -498,7 +504,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
     prevCode = code; // remember what was compiled so the retry can be shown the flagged lines
     effHeader = null; // relax the forced header so the retry can rewrite the whole module
   }
-  return { name: mod.name, code: null, ok: false, attempts: maxTries, error: lastErr };
+  return { name: mod.name, code: null, ok: false, attempts: attempt, error: lastErr };
 }
 
 // --- Complexity: code computes the evidence, the LLM produces the verdict -----
@@ -1468,7 +1474,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         header = null; // let the Builder write the whole module (with the missing port)
       }
     } catch (e) { header = null; }
-    const r = await buildModule(llm, spec, mod, builtFiles, 3, onProgress, manifest, header);
+    const r = await buildModule(llm, spec, mod, builtFiles, 0, onProgress, manifest, header, shouldStop); // 0 = unlimited compile-fix retries (Stop to halt)
     if (r.ok) {
       builtFiles[r.name] = r.code;
 
