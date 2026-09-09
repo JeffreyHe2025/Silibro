@@ -1077,6 +1077,9 @@ async function funcTest(vllm, spec, entry, builtFiles) {
         "Simulator output was:\n" + String(sim.output || "").slice(0, 500);
     }
 
+    // Log the full oracle-testbench problem server-side (visible in `pm2 logs`) so
+    // the actual iverilog error is diagnosable even without the frontend.
+    console.log("[funcTest] " + entry.name + " oracle testbench try " + tbTry + "/" + maxTbTries + " failed:\n" + String(problem).slice(0, 900));
     // Out of tries → inconclusive (broken oracle, not a module bug).
     if (tbTry >= maxTbTries) {
       return { passed: null, details: "oracle testbench could not be made to work after " + maxTbTries + " tries: " + String(problem).slice(0, 160), tbBroken: true };
@@ -1707,6 +1710,12 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
                 const covTop = tbTopName(entry.funcTb, mod.name);
                 const cov = await runVerilatorCoverage(covFiles, covTop, mod.name);
                 entry.coverage = cov;
+                // Server-side log so the real cause is visible in `pm2 logs` even when
+                // the Amplify frontend hasn't been rebuilt to render `output`.
+                if (!cov.ran) {
+                  console.log("[coverage] " + mod.name + " (top=" + covTop + "): " + (cov.reason || "failed"));
+                  if (cov.output) console.log("[coverage] " + mod.name + " verilator output:\n" + cov.output);
+                }
                 if (onProgress) onProgress({ type: "coverage", module: mod.name, available: cov.available, ran: cov.ran, linePercent: cov.linePercent, hitLines: cov.hitLines, totalLines: cov.totalLines, reason: cov.reason, output: cov.output });
               } catch (e) {
                 entry.coverage = { available: true, ran: false, reason: String((e && e.message) || e) };
