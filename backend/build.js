@@ -431,34 +431,6 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
         "```\n" + lastErr + "\n```" +
         "\n\nRead the error above, find the exact cause, and return a corrected, COMPILING version of module '" +
         mod.name + "' that resolves every error shown.";
-      // Targeted hint for the strict-enum error, which the model otherwise keeps
-      // reproducing: steer it off SystemVerilog enums entirely.
-      if (/explicit cast/i.test(String(lastErr))) {
-        user +=
-          "\nThe 'explicit cast' error is iverilog's strict SystemVerilog enum rule. REMOVE the 'typedef enum' " +
-          "and rewrite the state encoding with localparam constants and a plain 'logic [N:0] state, next_state;' " +
-          "register — then all your state assignments compile with no casts.";
-      }
-      // "Unable to bind wire/reg/memory `x'" = a signal used but never declared — usually a
-      // PORT the header omitted. The header is dropped below, so tell it to declare it.
-      var bindM = String(lastErr).match(/Unable to bind (?:wire\/reg\/memory|parameter)\s+[`']?(\w+)/i);
-      if (bindM) {
-        user +=
-          "\nThe error 'Unable to bind ... `" + bindM[1] + "'' means '" + bindM[1] + "' is USED but never " +
-          "DECLARED. Write the COMPLETE module (you may now define the header yourself) and DECLARE '" + bindM[1] +
-          "': add it to the module's port list with the correct direction and width if the spec lists it as an " +
-          "I/O signal; otherwise declare it as an internal wire/reg.";
-      }
-      // "sorry: <X> statements not supported" = an iverilog gap (break/continue/return/
-      // disable). The model keeps re-emitting it from the bare error, so spell out the fix.
-      var unsupM = String(lastErr).match(/sorry:\s*([a-z]+)\s+statements? not supported/i);
-      if (unsupM) {
-        user +=
-          "\niverilog does NOT support '" + unsupM[1] + "' statements. REMOVE every `" + unsupM[1] + "` (and any " +
-          "`continue`/`return`/`disable`) and restructure: bound the `for` loop by its range, guard the body with " +
-          "an `if`, or use a `found`/`done` flag and stop updating once it is set (e.g. `if (!found) begin … found = 1; end`). " +
-          "Do not use loop-control statements at all.";
-      }
     }
 
     const reply = await callLLM({
