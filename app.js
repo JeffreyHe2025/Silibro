@@ -131,6 +131,17 @@
   var consoleBody = $("console-body");
   var consoleHeader = $("console-header");
   var consoleClearBtn = $("console-clear");
+  // Per-project console: each project keeps its own build output. consoleBody always shows
+  // the CURRENT project's console; on a switch we snapshot the old one and load the new one.
+  var projectConsoles = {};       // projectId (or "__none__") -> console innerHTML
+  var consoleOwnerId = "__none__"; // whose output is currently in consoleBody
+  function switchProjectConsole(newId) {
+    var key = newId == null ? "__none__" : newId;
+    if (key === consoleOwnerId) return;
+    projectConsoles[consoleOwnerId] = consoleBody.innerHTML; // save the outgoing console
+    consoleBody.innerHTML = projectConsoles[key] || "";      // load the incoming one
+    consoleOwnerId = key;
+  }
   var consoleCloseBtn = $("console-close");
   var consoleConfigBtn = $("console-config");
 
@@ -652,6 +663,7 @@
     files = [];
     currentProjectId = null;
     currentFileId = null;
+    projectConsoles = {}; consoleOwnerId = "__none__"; consoleBody.innerHTML = ""; // fresh per-project consoles
     filesSection.classList.add("hidden");
     closeEditorPanel();
     initEditor();
@@ -718,6 +730,7 @@
     if (!p) return;
     currentProjectId = id;
     currentFileId = null;
+    switchProjectConsole(id); // show this project's console
     projectNameInput.value = p.name || "";
     filesSection.classList.remove("hidden");
     renderProjectList();
@@ -750,6 +763,7 @@
         newProjectBtn.disabled = false;
         if (fres.error) { alert("Could not create file: " + fres.error.message); }
         currentProjectId = project.id;
+        switchProjectConsole(project.id); // fresh (empty) console for the new project
         projectNameInput.value = project.name;
         filesSection.classList.remove("hidden");
         renderProjectList();
@@ -833,6 +847,7 @@
     pendingProjectDelete = null;
     if (pd.timer) clearTimeout(pd.timer);
     lsRemovePending(LS_PENDING_PROJ_DEL, pd.id); // committing now → no startup re-flush
+    delete projectConsoles[pd.id]; // free the deleted project's console (undo window passed)
     hideDeleteToast();
     // The linked chats were already removed from the UI at delete time (pd.chats); delete
     // the project, then on success delete those chats from the DB too.
@@ -900,6 +915,7 @@
     currentProjectId = null;
     currentFileId = null;
     files = [];
+    switchProjectConsole(null); // blank the console (deleted project's console is kept for undo)
     filesSection.classList.add("hidden");
     closeEditorPanel();
     renderProjectList();
@@ -1890,6 +1906,7 @@
     var project = res.data;
     projects.unshift(project);
     currentProjectId = project.id;
+    switchProjectConsole(project.id); // build output goes to the new project's console
     projectNameInput.value = project.name;
     filesSection.classList.remove("hidden");
     renderProjectList();
@@ -3719,6 +3736,7 @@
     currentProjectId = null;
     currentFileId = null;
     files = [];
+    switchProjectConsole(null); // blank console for the fresh (no-project) context
     filesSection.classList.add("hidden");
     closeEditorPanel();
     renderProjectList();
