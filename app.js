@@ -131,17 +131,15 @@
   var consoleBody = $("console-body");
   var consoleHeader = $("console-header");
   var consoleClearBtn = $("console-clear");
-  // Per-project console: each project keeps its own build output. consoleBody always shows
-  // the CURRENT project's console; on a switch we snapshot the old one and load the new one.
-  var projectConsoles = {};       // projectId (or "__none__") -> console innerHTML
-  var consoleOwnerId = "__none__"; // whose output is currently in consoleBody
-  function switchProjectConsole(newId) {
-    var key = newId == null ? "__none__" : newId;
-    if (key === consoleOwnerId) return;
-    projectConsoles[consoleOwnerId] = consoleBody.innerHTML; // save the outgoing console
-    consoleBody.innerHTML = projectConsoles[key] || "";      // load the incoming one
-    consoleOwnerId = key;
-  }
+  // Per-project console + multi-project builds. Each project keeps its OWN console as a list
+  // of entries; a build's output is routed to the project it belongs to (buildLogTarget),
+  // so a build left running in the background never bleeds into another project's console.
+  var projectConsoles = {};        // projectId (or "__none__") -> [{text,kind,tag}]
+  var consoleOwnerId = "__none__"; // whose console is currently shown in consoleBody
+  var buildLogTarget = null;       // during stream processing: the project a build's output belongs to
+  var haltedProjects = {};         // projectId -> true when its build's output was stopped
+  var projectBuilding = {};        // projectId -> true while a build is running for it (gates chat send)
+  var projectBuildThread = {};     // projectId -> backend threadId of its running build (for per-project Stop)
   var consoleCloseBtn = $("console-close");
   var consoleConfigBtn = $("console-config");
 
@@ -664,6 +662,7 @@
     currentProjectId = null;
     currentFileId = null;
     projectConsoles = {}; consoleOwnerId = "__none__"; consoleBody.innerHTML = ""; // fresh per-project consoles
+    haltedProjects = {}; projectBuilding = {}; projectBuildThread = {}; buildLogTarget = null;
     filesSection.classList.add("hidden");
     closeEditorPanel();
     initEditor();
@@ -731,6 +730,7 @@
     currentProjectId = id;
     currentFileId = null;
     switchProjectConsole(id); // show this project's console
+    chatSend.disabled = false; // a build in ANOTHER project keeps running in the background — let this one be prompted
     projectNameInput.value = p.name || "";
     filesSection.classList.remove("hidden");
     renderProjectList();
@@ -2146,8 +2146,7 @@
     }
   }
 
-  var activeBuildThreadId = null; // the build currently running (for Stop)
-  var buildHalted = false; // set the instant Stop is clicked → drop any further stream output
+  var activeBuildThreadId = null; // the most recent build's thread (fallback for Stop)
   function genUUID() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
     return "b-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
@@ -2171,7 +2170,9 @@
     var el = $("build-controls"); if (el && el.parentNode) el.parentNode.removeChild(el);
   }
   function showStopButton() {
-    buildHalted = false; // a new build is starting → allow its output through
+    var pid = currentProjectId;                 // the project this build belongs to
+    haltedProjects[consoleKey(pid)] = false;    // new build → allow its output through
+    projectBuilding[consoleKey(pid)] = true;    // mark this project busy (gates chat send)
     removeBuildControls();
     var wrap = document.createElement("div");
     wrap.id = "build-controls"; wrap.className = "chat-msg assistant build-controls";
@@ -2179,7 +2180,7 @@
     btn.className = "btn"; btn.textContent = "⏹ Stop build";
     btn.addEventListener("click", function () {
       btn.disabled = true; btn.textContent = "stopping…";
-      stopActiveBuild();
+      stopActiveBuild(pid);
     });
     wrap.appendChild(btn);
     chatConversation.appendChild(wrap);
@@ -2198,14 +2199,16 @@
     chatConversation.appendChild(wrap);
     chatConversation.scrollTop = chatConversation.scrollHeight;
   }
-  function stopActiveBuild() {
-    if (!activeBuildThreadId) return;
-    buildHalted = true; // stop rendering further stream output immediately (no lag)
-    consoleLog("⏹ Stopping build…", "warn");
+  function stopActiveBuild(pid) {
+    if (pid === undefined) pid = currentProjectId;
+    haltedProjects[consoleKey(pid)] = true; // stop rendering THIS project's build output now
+    consoleAppend(pid, "⏹ Stopping build…", "warn");
+    var tid = projectBuildThread[consoleKey(pid)] || activeBuildThreadId;
+    if (!tid) return;
     var base = getBackendUrl();
     fetch(base + "/flow/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ threadId: activeBuildThreadId }),
+      body: JSON.stringify({ threadId: tid }),
     }).catch(function () {}); // the backend halts at the next checkpoint and returns partial progress
   }
   // Resume a stopped build: rebuild from the current project files (skip done modules).
@@ -2222,6 +2225,7 @@
       .map(function (f) { return { name: f.name, code: f.code || "" }; });
     var model = getProviderModel(provider);
     var tid = genUUID(); activeBuildThreadId = tid;
+    var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = tid; // per-project build (routing + Stop)
     var bubble = appendChatMsg("assistant", "▶ Resuming build…");
     showStopButton();
     try {
@@ -2231,7 +2235,7 @@
         headers: Object.assign({ "Content-Type": "application/json", "X-Anon-Id": getAnonId() }, await authHeaders()),
         body: JSON.stringify({ threadId: tid, spec: spec, files: vfiles, provider: provider, key: key, builderModel: model, verifierModel: model }),
       });
-      var data = await readFlowStream(resp);
+      var data = await readFlowStream(resp, pid);
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
       if (!data || data.error) {
         bubble.textContent = "⚠ " + ((data && data.error) || "resume failed");
@@ -2427,6 +2431,7 @@
     var vfiles = files.filter(function (f) { return isVerilogName(f.name) && f.name !== "netlist.v"; })
       .map(function (f) { return { name: f.name, code: f.code || "" }; });
     var tid = genUUID(); activeBuildThreadId = tid;
+    var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = tid; // per-project build (routing + Stop)
     bubble.textContent = "✏️ Applying your change — updating the spec and rebuilding only the affected modules…";
     showStopButton();
     try {
@@ -2437,7 +2442,7 @@
         body: JSON.stringify({ threadId: tid, spec: spec, files: vfiles, editRequest: editText,
           provider: provider, key: key, builderModel: model, verifierModel: model }),
       });
-      var data = await readFlowStream(resp);
+      var data = await readFlowStream(resp, pid);
       activeBuildThreadId = null; removeBuildControls();
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
       if (!data || data.error) {
@@ -2468,6 +2473,7 @@
       hideSpecModal();
       bubble = appendChatMsg("assistant", "🔨 Building… compiling each module with iverilog. This can take a moment.");
       activeBuildThreadId = flowThreadId;
+      var pid = currentProjectId; projectBuildThread[consoleKey(pid)] = flowThreadId; // per-project build
       showStopButton();
     } else {
       specModalText.textContent = "Verifier is revising the spec based on your changes…";
@@ -2494,7 +2500,7 @@
       }
       // The response is newline-delimited JSON: build events stream in live,
       // then a final line carries the result. (Rejections send only that line.)
-      var data = await readFlowStream(resp);
+      var data = await readFlowStream(resp, pid);
       activeBuildThreadId = null; removeBuildControls();
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance); // Bedrock spend
       if (!data || data.error) {
@@ -2522,7 +2528,7 @@
   // Log a single build event live (used as the NDJSON stream arrives).
   function logBuildEvent(ev) {
     if (!ev) return;
-    if (buildHalted) return; // Stop was clicked → ignore any late events still in flight
+    if (haltedProjects[consoleKey(buildLogTarget)]) return; // this project's build was Stopped → drop late events
     if (ev.type === "editPlan") {
       consoleLog((ev.changed && ev.changed.length)
         ? "✏️ edit: rebuilding only " + ev.changed.join(", ") + " (other modules kept)"
@@ -2638,7 +2644,7 @@
 
   // Read a newline-delimited-JSON stream: log progress events as they land,
   // return the final (non-progress) message.
-  async function readFlowStream(resp) {
+  async function readFlowStream(resp, projectId) {
     if (!resp.body || !resp.body.getReader) return await resp.json(); // fallback
     var reader = resp.body.getReader();
     var decoder = new TextDecoder();
@@ -2649,8 +2655,12 @@
       if (!line) return;
       var msg;
       try { msg = JSON.parse(line); } catch (e) { return; }
-      if (msg.type === "progress") logBuildEvent(msg.event);
-      else finalMsg = msg; // {done,...} or {error}
+      if (msg.type === "progress") {
+        // Route this build's output to ITS project (not whatever is displayed now).
+        var prev = buildLogTarget;
+        buildLogTarget = projectId !== undefined ? projectId : currentProjectId;
+        try { logBuildEvent(msg.event); } finally { buildLogTarget = prev; }
+      } else finalMsg = msg; // {done,...} or {error}
     }
     while (true) {
       var chunk = await reader.read();
@@ -2831,6 +2841,7 @@
     if (!spec) { var sf = files.find(function (f) { return /^spec\.md$/i.test(f.name); }); spec = (sf && sf.code) || ""; }
     var review = (lastFlowData && lastFlowData.review) || "";
     var model = getProviderModel(provider);
+    var pid = currentProjectId; // route this re-fix's output to the current project
     var bubble = appendChatMsg("assistant", "🔧 Rewriting mismatched modules and re-verifying…");
     consoleLog("🔧 re-fix: sending the review back to rewrite mismatched modules…", "info");
     try {
@@ -2852,7 +2863,7 @@
         if (resp.status === 402) onOutOfCredits();
         return;
       }
-      var data = await readFlowStream(resp);
+      var data = await readFlowStream(resp, pid);
       if (data && typeof data.balance === "number") updateCreditsBadge(data.balance);
       if (!data || data.error) {
         bubble.textContent = "⚠ re-fix failed: " + ((data && data.error) || "the backend returned no result — it may be an older version without /refix (git pull && pm2 restart server).");
@@ -2899,28 +2910,60 @@
   });
   document.addEventListener("click", function () { moreMenu.classList.add("hidden"); });
 
-  // ---- Activity console (bottom-left): logs runs by the user and the AI ----
-  function consoleLog(text, kind, tag) {
+  // ---- Per-project activity console ----
+  var CONSOLE_MAX = 3000; // cap entries per project
+  function consoleKey(id) { return id == null ? "__none__" : id; }
+  function renderConsoleLine(entry) {
     var line = document.createElement("div");
-    line.className = "console-line" + (kind ? " " + kind : "");
-    if (tag) line.dataset.tag = tag; // so later events can find & recolor this line
-    line.textContent = text;
+    line.className = "console-line" + (entry.kind ? " " + entry.kind : "");
+    if (entry.tag) line.dataset.tag = entry.tag;
+    line.textContent = entry.text;
     consoleBody.appendChild(line);
-    consoleBody.scrollTop = consoleBody.scrollHeight;
-    consolePanel.classList.remove("hidden"); // pop up on activity
-    consoleToggle.classList.add("hidden");
   }
-
-  // Turn a module's orange compile-retry lines GREEN once it finally compiles, so a
-  // build that self-heals visibly resolves instead of leaving orange warnings behind.
+  // Append to a SPECIFIC project's console. Only the DISPLAYED project touches the DOM;
+  // a background build's output just accumulates in its own buffer.
+  function consoleAppend(projectId, text, kind, tag) {
+    var key = consoleKey(projectId);
+    var arr = projectConsoles[key] || (projectConsoles[key] = []);
+    var entry = { text: text, kind: kind || "", tag: tag || "" };
+    arr.push(entry);
+    if (arr.length > CONSOLE_MAX) arr.splice(0, arr.length - CONSOLE_MAX);
+    if (key === consoleOwnerId) {
+      renderConsoleLine(entry);
+      consoleBody.scrollTop = consoleBody.scrollHeight;
+      consolePanel.classList.remove("hidden"); // pop up on activity (displayed project only)
+      consoleToggle.classList.add("hidden");
+    }
+  }
+  // General logger → the build's project if a build stream is being processed, else the current one.
+  function consoleLog(text, kind, tag) {
+    consoleAppend(buildLogTarget != null ? buildLogTarget : currentProjectId, text, kind, tag);
+  }
+  // Show a project's console (render its buffer). Called on every project switch.
+  function switchProjectConsole(newId) {
+    var key = consoleKey(newId);
+    if (key === consoleOwnerId) return;
+    consoleOwnerId = key;
+    consoleBody.innerHTML = "";
+    var arr = projectConsoles[key] || [];
+    for (var i = 0; i < arr.length; i++) renderConsoleLine(arr[i]);
+    consoleBody.scrollTop = consoleBody.scrollHeight;
+  }
+  // Turn a module's orange compile-retry lines GREEN once it compiles — in the build's own
+  // project buffer, and in the DOM if that project is currently displayed.
   function resolveRetryLines(module) {
+    var key = consoleKey(buildLogTarget != null ? buildLogTarget : currentProjectId);
     var tag = "retry:" + module;
-    var lines = consoleBody.querySelectorAll(".console-line");
-    for (var i = 0; i < lines.length; i++) {
-      var el = lines[i];
-      if (el.dataset && el.dataset.tag === tag && !el.classList.contains("resolved")) {
-        el.classList.remove("warn");
-        el.classList.add("ok", "resolved");
+    var arr = projectConsoles[key] || [];
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].tag === tag && arr[i].kind !== "ok resolved") arr[i].kind = "ok resolved";
+    }
+    if (key === consoleOwnerId) {
+      var lines = consoleBody.querySelectorAll(".console-line");
+      for (var j = 0; j < lines.length; j++) {
+        if (lines[j].dataset && lines[j].dataset.tag === tag && !lines[j].classList.contains("resolved")) {
+          lines[j].classList.remove("warn"); lines[j].classList.add("ok", "resolved");
+        }
       }
     }
   }
@@ -2932,7 +2975,10 @@
     consolePanel.classList.add("hidden");
     consoleToggle.classList.remove("hidden");
   });
-  consoleClearBtn.addEventListener("click", function () { consoleBody.innerHTML = ""; });
+  consoleClearBtn.addEventListener("click", function () {
+    projectConsoles[consoleOwnerId] = []; // clear the displayed project's buffer + DOM
+    consoleBody.innerHTML = "";
+  });
 
   // ---- Developer view (internal LLM-reference state; hidden unless dev mode) ----
   var consoleDevBtn = $("console-dev");
