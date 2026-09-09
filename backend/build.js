@@ -1567,7 +1567,9 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
       // tier modules — the LLM oracle testbench with fault localization & correction.
       //   verification: 'unverified' | 'smoke' | 'functional'
       //   Only 'functional' counts as trusted for pruning / fault isolation.
-      if (entry) {
+      if (entry && shouldStop()) {
+        entry.verification = "unverified"; // Stop requested → skip the slow verification steps
+      } else if (entry) {
         const floorFiles = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
         if (onProgress) onProgress({ type: "verifyStart", module: mod.name, tier: tier });
 
@@ -1603,7 +1605,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         // functional testbench. Re-runs structural + smoke on the corrected code. Bounded
         // by the shared fix budget.
         const MAX_SMOKE_FIX = 2;
-        for (let sTry = 1; !stopTests && smoke.passed === false && sTry <= MAX_SMOKE_FIX; sTry++) {
+        for (let sTry = 1; !stopTests && !shouldStop() && smoke.passed === false && sTry <= MAX_SMOKE_FIX; sTry++) {
           chargeBudget(fixBudget);
           if (onProgress) onProgress({ type: "drill", depth: 0, module: mod.name,
             msg: "smoke failed (X / stuck outputs) — rebuilding the module (fix " + sTry + "/" + MAX_SMOKE_FIX + ")…" });
@@ -1637,7 +1639,7 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
           // time, skipping verified children, suspicion-ordered) and rebuilds it,
           // then re-tests. Only runs if the module is structurally sound. The smoke
           // baseline above lets this path tell a broken testbench from a broken module.
-          if (structuralOk) {
+          if (structuralOk && !shouldStop()) {
             try {
               await localizeAndFix(llm, verifierLLM, spec, entry, builtFiles, manifestByName, onProgress, fixBudget, 0);
             } catch (e) { entry.funcTbOutput = String((e && e.message) || e); }

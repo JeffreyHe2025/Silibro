@@ -2147,6 +2147,7 @@
   }
 
   var activeBuildThreadId = null; // the build currently running (for Stop)
+  var buildHalted = false; // set the instant Stop is clicked → drop any further stream output
   function genUUID() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
     return "b-" + Date.now() + "-" + Math.floor(Math.random() * 1e9);
@@ -2170,6 +2171,7 @@
     var el = $("build-controls"); if (el && el.parentNode) el.parentNode.removeChild(el);
   }
   function showStopButton() {
+    buildHalted = false; // a new build is starting → allow its output through
     removeBuildControls();
     var wrap = document.createElement("div");
     wrap.id = "build-controls"; wrap.className = "chat-msg assistant build-controls";
@@ -2198,11 +2200,13 @@
   }
   function stopActiveBuild() {
     if (!activeBuildThreadId) return;
+    buildHalted = true; // stop rendering further stream output immediately (no lag)
+    consoleLog("⏹ Stopping build…", "warn");
     var base = getBackendUrl();
     fetch(base + "/flow/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ threadId: activeBuildThreadId }),
-    }).catch(function () {}); // the build stops between modules and returns its partial result
+    }).catch(function () {}); // the backend halts at the next checkpoint and returns partial progress
   }
   // Resume a stopped build: rebuild from the current project files (skip done modules).
   async function resumeBuild() {
@@ -2518,6 +2522,7 @@
   // Log a single build event live (used as the NDJSON stream arrives).
   function logBuildEvent(ev) {
     if (!ev) return;
+    if (buildHalted) return; // Stop was clicked → ignore any late events still in flight
     if (ev.type === "editPlan") {
       consoleLog((ev.changed && ev.changed.length)
         ? "✏️ edit: rebuilding only " + ev.changed.join(", ") + " (other modules kept)"
