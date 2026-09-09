@@ -758,21 +758,20 @@
       }
       var project = res.data;
       projects.unshift(project);
-      // Seed the project with one starter file.
-      return dbCreateFile(project.id, "top.v", STARTER_CODE).then(function (fres) {
-        newProjectBtn.disabled = false;
-        if (fres.error) { alert("Could not create file: " + fres.error.message); }
-        currentProjectId = project.id;
-        switchProjectConsole(project.id); // fresh (empty) console for the new project
-        projectNameInput.value = project.name;
-        filesSection.classList.remove("hidden");
-        renderProjectList();
-        files = fres.data ? [fres.data] : [];
-        renderFileList();
-        if (files.length) openFile(files[0].id);
-        newChat();            // a brand-new project starts with a fresh chat
-        renderProjectChats(); // (empty until the first prompt links a chat)
-      });
+      // Start empty — no placeholder file. The build fills in the modules; until then
+      // the Files list is empty and the editor shows nothing.
+      newProjectBtn.disabled = false;
+      currentProjectId = project.id;
+      currentFileId = null;
+      switchProjectConsole(project.id); // fresh (empty) console for the new project
+      projectNameInput.value = project.name;
+      filesSection.classList.remove("hidden");
+      renderProjectList();
+      files = [];
+      renderFileList();
+      closeEditorPanel();     // nothing to open yet
+      newChat();              // a brand-new project starts with a fresh chat
+      renderProjectChats();   // (empty until the first prompt links a chat)
     });
   });
 
