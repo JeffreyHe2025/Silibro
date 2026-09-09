@@ -450,6 +450,16 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
           "': add it to the module's port list with the correct direction and width if the spec lists it as an " +
           "I/O signal; otherwise declare it as an internal wire/reg.";
       }
+      // "sorry: <X> statements not supported" = an iverilog gap (break/continue/return/
+      // disable). The model keeps re-emitting it from the bare error, so spell out the fix.
+      var unsupM = String(lastErr).match(/sorry:\s*([a-z]+)\s+statements? not supported/i);
+      if (unsupM) {
+        user +=
+          "\niverilog does NOT support '" + unsupM[1] + "' statements. REMOVE every `" + unsupM[1] + "` (and any " +
+          "`continue`/`return`/`disable`) and restructure: bound the `for` loop by its range, guard the body with " +
+          "an `if`, or use a `found`/`done` flag and stop updating once it is set (e.g. `if (!found) begin … found = 1; end`). " +
+          "Do not use loop-control statements at all.";
+      }
     }
 
     const reply = await callLLM({
@@ -609,6 +619,10 @@ const IVERILOG_RULES =
   "- Use plain `case` \u2026 `default`; avoid the `unique`/`priority` case qualifiers.\n" +
   "- Size every literal to its signal width (`8'd0`, `4'b0000`, not a bare `0`), and drive each signal from " +
   "exactly ONE always block or ONE continuous `assign`.\n" +
+  "- Do NOT use `break`, `continue`, `return`, or `disable` inside loops \u2014 iverilog rejects them ('sorry: " +
+  "break statements not supported'). Restructure instead: use a `for` loop bounded by its range, guard the body " +
+  "with an `if`, or set a flag and stop updating once it's set. For priority/first-match logic, iterate high\u2192low " +
+  "(or low\u2192high) and use `if (!found) ...`.\n" +
   "- Declare every signal before use \u2014 no undeclared identifiers, no implicit nets, no SystemVerilog casts.";
 function routeTier(score, features, cutoff) {
   cutoff = cutoff || FLOOR_CUTOFF;
