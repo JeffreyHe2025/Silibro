@@ -367,7 +367,7 @@ function splitHeaderBody(code) {
 // ":N:" line references map exactly (the compiled file may include the forced header,
 // shifting numbers) and the model can see the whole file it's fixing. Lines the compiler
 // flagged are marked ">>>". General — works for any error that cites "<module>.v:<N>:".
-function numberedSourceForRetry(code, errText, modName) {
+function numberedSourceForRetry(code, errText, modName, label) {
   const lines = String(code || "").split("\n");
   if (!code || !lines.length) return "";
   const esc = String(modName || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -381,8 +381,8 @@ function numberedSourceForRetry(code, errText, modName) {
     while (num.length < width) num = " " + num;
     return (flagged[n] ? ">>>" : "   ") + num + " | " + ln;
   }).join("\n");
-  return "\n\nThis is EXACTLY the module you compiled, with line numbers matching the error above " +
-    "(>>> marks a flagged line):\n```\n" + body + "\n```";
+  return "\n\nThis is EXACTLY the " + (label || "module") + " you compiled, with line numbers matching the error " +
+    "above (>>> marks a flagged line):\n```\n" + body + "\n```";
 }
 
 // Step 3: build one module, compile-checking it (with retries).
@@ -994,26 +994,30 @@ async function fixModuleFromSmoke(llm, spec, mod, builtFiles, markers, prevCode)
   return null;
 }
 
-// Rebuild a module that COMPILES but FAILS LINT — e.g. a for-loop step that isn't a
-// simple +/- (Verilator can't unroll it for coverage), an inferred latch, or a width
-// issue. Feeds the exact lint output (file:line) back so the builder fixes the flagged
-// construct, keeping the interface + behavior. Returns compiling code or null.
-async function fixModuleFromLint(llm, spec, mod, builtFiles, lintOutput, prevCode) {
+// Rebuild a module that COMPILES but FAILS a STRUCTURAL check — lint (e.g. a for-loop
+// step that isn't a simple +/-, which Verilator can't unroll for coverage; an inferred
+// latch; a width issue) and/or generic synthesis (yosys: undriven/multi-driver/comb
+// loop/unbounded loop/elaboration). Feeds the exact tool output (file:line) back so the
+// builder fixes the flagged construct, keeping the interface + behavior. Returns
+// compiling code or null. `kinds` names what failed (e.g. "lint", "synthesis").
+async function fixModuleStructural(llm, spec, mod, builtFiles, problemText, prevCode, kinds) {
   const depNames = (mod.dependsOn || []).filter((n) => builtFiles[n]);
   const depContext = depNames.map((n) => "--- " + n + ".v (already built) ---\n" + builtFiles[n]).join("\n\n");
   const sys =
-    "You are a Verilog module writer. Your module COMPILES but the linter flagged issue(s) that must be fixed for " +
-    "it to be cleanly SYNTHESIZABLE and to build under Verilator (needed for coverage). Rewrite the MODULE to " +
-    "eliminate EVERY flagged issue at the reported line(s), keeping the SAME module name, ports, parameters and the " +
-    "SAME behavior. In particular, if a 'for' loop is flagged: its step MUST be a simple 'i = i + 1' or 'i = i - 1' " +
-    "with STATIC bounds so the tool can unroll it — move any shift/multiply/division into the loop BODY, never the " +
-    "loop step (e.g. rewrite `for (n=W; n>0; n=n>>1)` as a counted `for (k=0; k<COUNT; k=k+1)` and derive the " +
-    "shifted value inside). Also drive every output on every path (no inferred latches) and size all literals. " +
-    "Output ONLY the corrected module inside one ```verilog code block — no prose, no testbench." + RESET_REF + IVERILOG_RULES;
+    "You are a Verilog module writer. Your module COMPILES but FAILED a " + (kinds || "structural") + " check — it " +
+    "must be cleanly SYNTHESIZABLE and lint-clean (also so it builds under Verilator for coverage). Rewrite the " +
+    "MODULE to eliminate EVERY flagged issue at the reported line(s), keeping the SAME module name, ports, " +
+    "parameters and the SAME behavior. In particular, if a 'for' loop is flagged: its step MUST be a simple " +
+    "'i = i + 1' or 'i = i - 1' with STATIC bounds so the tool can unroll it — move any shift/multiply/division " +
+    "into the loop BODY, never the loop step (e.g. rewrite `for (n=W; n>0; n=n>>1)` as a counted " +
+    "`for (k=0; k<COUNT; k=k+1)` and derive the shifted value inside). Drive every output on every path (no " +
+    "inferred latches), avoid multi-driver/combinational-loop nets, and size all literals. Output ONLY the " +
+    "corrected module inside one ```verilog code block — no prose, no testbench." + RESET_REF + IVERILOG_RULES;
   const base =
     "Design spec:\n" + builderSpec(spec, mod.name) +
-    "\n\nLINT ERROR(S) to fix (exact tool output, with line numbers):\n" + String(lintOutput || "").slice(0, 700) +
-    "\n\nYour current module (it compiles, but has the lint issue(s) above):\n```verilog\n" + (prevCode || "") + "\n```" +
+    "\n\n" + (kinds ? kinds.toUpperCase() : "STRUCTURAL") + " ERROR(S) to fix (exact tool output, with line numbers):\n" +
+    String(problemText || "").slice(0, 900) +
+    "\n\nYour current module (it compiles, but has the issue(s) above):\n```verilog\n" + (prevCode || "") + "\n```" +
     (depContext ? "\n\nIt instantiates these already-built modules (do NOT redefine them):\n\n" + depContext : "");
   let lastErr = "";
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1060,8 +1064,8 @@ async function repairFunctionalTestbench(llm, mod, spec, summary, prevCode, prob
     "prose, no module under test." + IVERILOG_RULES + VERILATOR_TB_RULES;
   const user =
     "Module under test: " + mod.name + "\nPorts (exact names/directions/widths): " + JSON.stringify(ports) +
-    "\n\nThe PROBLEM with your testbench (a compile error, or it ran but printed no FUNC_PASS/FUNC_FAIL):\n" +
-    String(problem || "").slice(0, 800) +
+    "\n\nThe PROBLEM with your testbench (a compile error with the exact line(s), or it ran but printed no FUNC_PASS/FUNC_FAIL):\n" +
+    String(problem || "").slice(0, 2600) +
     "\n\nYour previous (broken) testbench:\n```verilog\n" + prevCode + "\n```" +
     "\n\nDesign specification (source of truth for expected outputs):\n" + spec;
   const reply = await callLLM({ ...llm, system: sys, messages: [{ role: "user", content: user }] });
@@ -1103,7 +1107,8 @@ async function funcTest(vllm, spec, entry, builtFiles) {
       if (where === "module") {
         return { passed: null, details: "module compile error under test: " + sim.output.slice(0, 200), tbBroken: false };
       }
-      problem = "COMPILE ERROR from iverilog:\n" + String(sim.output || "").slice(0, 700);
+      problem = "COMPILE ERROR from iverilog (fix the EXACT line(s) flagged below):\n" + String(sim.output || "").slice(0, 700) +
+        numberedSourceForRetry(ftb.code, sim.output, "func_tb", "testbench");
     } else {
       const markers = ((sim.output.match(/FUNC_[A-Z]+[^\n]*/g) || []).join("; ") || sim.output.slice(0, 160)).slice(0, 400);
       if (/FUNC_PASS/.test(sim.output) && !/FUNC_FAIL/.test(sim.output)) return { passed: true, details: markers };
@@ -1678,20 +1683,24 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
         let synthOk = synth.available ? synth.synthesizable === true : true;
         let structuralOk = lint.clean && synthOk;
 
-        // LINT-FAILURE FIX (BOTH tiers): a module can compile yet fail lint with a
-        // synthesis-blocking construct — e.g. a for-loop step that isn't a simple +/-,
-        // which Verilator can't unroll for coverage. That would silently mark the module
-        // structurally not-ok and skip the functional test + coverage. Instead, send the
-        // EXACT lint error (with line numbers) BACK to the Builder to fix, then re-lint/
-        // synth. Bounded by the shared fix budget.
-        const MAX_LINT_FIX = 2;
-        for (let lTry = 1; !stopTests && !shouldStop() && lint.clean === false && lTry <= MAX_LINT_FIX; lTry++) {
+        // STRUCTURAL-FAILURE FIX (BOTH tiers): a module can compile yet fail lint (e.g. a
+        // for-loop step that isn't a simple +/-, which Verilator can't unroll for coverage)
+        // or generic synthesis (yosys: undriven/multi-driver/comb loop/unbounded loop).
+        // Either silently marks the module structurally not-ok and skips the functional
+        // test + coverage. Instead, send the EXACT lint/synthesis error (with line numbers)
+        // BACK to the Builder to fix, then re-lint/synth. Bounded by the shared fix budget.
+        const MAX_STRUCT_FIX = 2;
+        for (let sTry = 1; !stopTests && !shouldStop() && structuralOk === false && sTry <= MAX_STRUCT_FIX; sTry++) {
+          const kinds = [lint.clean === false ? "lint" : null, synthOk === false ? "synthesis" : null].filter(Boolean).join(" + ");
+          const problemText =
+            (lint.clean === false && entry.lintOutput ? "LINT error(s) (iverilog):\n" + entry.lintOutput + "\n\n" : "") +
+            (synthOk === false && entry.synthOutput ? "SYNTHESIS error(s) (yosys):\n" + entry.synthOutput : "");
           chargeBudget(fixBudget);
-          console.log("[lintFix] " + mod.name + " (fix " + lTry + "/" + MAX_LINT_FIX + ") sending lint error back to builder:\n" + String(entry.lintOutput || "").slice(0, 400));
+          console.log("[structFix] " + mod.name + " (fix " + sTry + "/" + MAX_STRUCT_FIX + ") sending " + kinds + " error back to builder:\n" + String(problemText).slice(0, 400));
           if (onProgress) onProgress({ type: "drill", depth: 0, module: mod.name,
-            msg: "lint flagged an issue — sending it back to the builder with the exact error + line (fix " + lTry + "/" + MAX_LINT_FIX + ")…" });
-          const fixed = await fixModuleFromLint(llm, spec, mod, builtFiles, entry.lintOutput, r.code);
-          if (!fixed) break; // couldn't produce a compiling fix → keep the lint state and fall through
+            msg: kinds + " flagged an issue — sending it back to the builder with the exact error + line (fix " + sTry + "/" + MAX_STRUCT_FIX + ")…" });
+          const fixed = await fixModuleStructural(llm, spec, mod, builtFiles, problemText, r.code, kinds);
+          if (!fixed) break; // couldn't produce a compiling fix → keep the state and fall through
           builtFiles[mod.name] = fixed; r.code = fixed; entry.code = fixed;
           const ff = Object.keys(builtFiles).map((n) => ({ name: n + ".v", code: builtFiles[n] }));
           lint = await lintVerilog(ff, mod.name);
@@ -1701,8 +1710,8 @@ async function buildDesign(llm, spec, onProgress, verifierLLM, decide, control) 
           entry.lintClean = lint.clean; entry.lintOutput = lint.output ? lint.output.slice(0, 500) : "";
           entry.synthesizable = synth.synthesizable; entry.synthAvailable = synth.available;
           entry.synthOutput = synth.output ? synth.output.slice(0, 500) : "";
-          if (onProgress) onProgress({ type: "check", module: mod.name, name: "lint", ok: lint.clean === true, reason: lint.output ? String(lint.output).split("\n")[0] : "", phase: "lintFix" });
-          if (onProgress) onProgress({ type: "check", module: mod.name, name: "synth", synthesizable: synth.synthesizable, available: synth.available, reason: synth.output ? String(synth.output).split("\n")[0] : "", phase: "lintFix" });
+          if (onProgress) onProgress({ type: "check", module: mod.name, name: "lint", ok: lint.clean === true, reason: lint.output ? String(lint.output).split("\n")[0] : "", phase: "structFix" });
+          if (onProgress) onProgress({ type: "check", module: mod.name, name: "synth", synthesizable: synth.synthesizable, available: synth.available, reason: synth.output ? String(synth.output).split("\n")[0] : "", phase: "structFix" });
         }
 
         // SMOKE BASELINE on EVERY module (both tiers): a code-generated X-check
