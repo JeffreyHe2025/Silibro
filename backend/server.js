@@ -509,6 +509,16 @@ app.post("/build", async (req, res) => {
   }
 });
 
+// Keep a long NDJSON stream alive during silent steps (LLM calls, slow synth/sim) by
+// writing a blank line every 15s. Without it, a silent gap longer than the reverse proxy's
+// read timeout (nginx default 60s) drops the connection → the client sees a "network error"
+// mid-build. Blank lines are ignored by the client's line parser. Returns a stop function.
+function startHeartbeat(res) {
+  const hb = setInterval(() => { try { res.write("\n"); } catch (e) {} }, 15000);
+  res.on("close", () => clearInterval(hb));
+  return () => clearInterval(hb);
+}
+
 // User-triggered RE-FIX from the final review: rewrite the modules the review
 // flagged as mismatched, then re-verify (complexity + functional testbench).
 // Streams NDJSON progress like /flow/approve, then a final { done, files, manifest,
@@ -528,6 +538,7 @@ app.post("/refix", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
   const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  const stopHb = startHeartbeat(res); // keep the stream alive through silent steps
   try {
     const builder = { provider, key, model: builderModel || model };
     const verifier = { provider, key, model: verifierModel || builderModel || model };
@@ -538,6 +549,7 @@ app.post("/refix", async (req, res) => {
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
+  stopHb();
   res.end();
 });
 
@@ -618,6 +630,7 @@ app.post("/flow/continue", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
   const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  const stopHb = startHeartbeat(res); // keep the stream alive through silent steps
   res.on("close", () => requestStop(tid));
   send({ threadId: tid }); // let the client target this build with /flow/stop
   try {
@@ -648,6 +661,7 @@ app.post("/flow/continue", async (req, res) => {
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
+  stopHb();
   res.end();
 });
 
@@ -664,6 +678,7 @@ app.post("/flow/approve", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering if present
   res.flushHeaders();
   const send = (obj) => { res.write(JSON.stringify(obj) + "\n"); };
+  const stopHb = startHeartbeat(res); // keep the stream alive through silent steps
   res.on("close", () => requestStop(threadId)); // client hit Stop / navigated away
 
   try {
@@ -679,6 +694,7 @@ app.post("/flow/approve", async (req, res) => {
   } catch (e) {
     send({ error: String((e && e.message) || e) });
   }
+  stopHb();
   res.end();
 });
 
