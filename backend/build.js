@@ -363,6 +363,32 @@ function splitHeaderBody(code) {
   return { body: code.slice(headerEnd + 1, endIdx).trim() };
 }
 
+// Show the Builder the EXACT source lines the compiler flagged, numbered and marked, so it
+// doesn't have to guess which line the error's ":N:" refers to (the compiled file may
+// include the forced header, shifting numbers). General — works for any error that cites
+// "<module>.v:<N>:". Prints each flagged line (with one line of context) from the compiled code.
+function annotateErrorLines(code, errText, modName) {
+  const lines = String(code || "").split("\n");
+  const esc = String(modName || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(esc + "\\.v:(\\d+):", "gi");
+  const nums = {}; let m;
+  while ((m = re.exec(String(errText || "")))) nums[parseInt(m[1], 10)] = 1;
+  const keys = Object.keys(nums).map(Number).filter((n) => n >= 1 && n <= lines.length).sort((a, b) => a - b);
+  if (!keys.length) return "";
+  const shown = {}, out = [];
+  keys.forEach((n) => {
+    for (let i = n - 1; i <= n + 1; i++) {
+      if (i >= 1 && i <= lines.length && !shown[i]) {
+        shown[i] = 1;
+        out.push((i === n ? ">>> " : "    ") + i + " | " + lines[i - 1]);
+      }
+    }
+  });
+  return out.length
+    ? "\n\nThese are the exact lines of YOUR module the compiler flagged (>>> marks the error line):\n```\n" + out.join("\n") + "\n```"
+    : "";
+}
+
 // Step 3: build one module, compile-checking it (with retries).
 // onAttempt(ev) (optional) is called after each compile so callers can stream
 // retries live: { type:'attempt', module, attempt, maxTries, ok, error }.
@@ -376,6 +402,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
   const statusRef = manifestReference(manifest);
 
   let lastErr = "";
+  let prevCode = ""; // the code that produced lastErr, so we can point the Builder at the flagged lines
   // The forced header is a FIRST-ATTEMPT optimization, not a cage: if the contract dropped
   // a port the body needs ("Unable to bind wire/reg/memory `x'"), the Builder can't fix it
   // while locked to that header. So after any compile failure we drop the forced header and
@@ -429,6 +456,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       user +=
         "\n\nYour previous version FAILED to compile. Here is the FULL Icarus Verilog error — FIX THIS:\n" +
         "```\n" + lastErr + "\n```" +
+        annotateErrorLines(prevCode, lastErr, mod.name) +
         "\n\nRead the error above, find the exact cause, and return a corrected, COMPILING version of module '" +
         mod.name + "' that resolves every error shown.";
     }
@@ -471,6 +499,7 @@ async function buildModule(llm, spec, mod, builtFiles, maxTries, onAttempt, mani
       return { name: mod.name, code, summary, attempts: attempt, ok: true };
     }
     lastErr = res.output;
+    prevCode = code; // remember what was compiled so the retry can be shown the flagged lines
     effHeader = null; // relax the forced header so the retry can rewrite the whole module
   }
   return { name: mod.name, code: null, ok: false, attempts: maxTries, error: lastErr };
