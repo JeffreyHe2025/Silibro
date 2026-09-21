@@ -153,23 +153,6 @@
   var currentFileId = null;
   var authMode = "signin";
 
-  var STARTER_CODE = [
-    "module counter (",
-    "    input  wire clk,",
-    "    input  wire rst_n,",
-    "    output reg  [7:0] count",
-    ");",
-    "",
-    "    always @(posedge clk or negedge rst_n) begin",
-    "        if (!rst_n)",
-    "            count <= 8'd0;",
-    "        else",
-    "            count <= count + 1'b1;",
-    "    end",
-    "",
-    "endmodule",
-  ].join("\n");
-
   // ---------------------------------------------------------------------------
   // Storage layer — Supabase when signed in, browser localStorage when a guest.
   // Sign-in is OPTIONAL: guests can use everything; their work is saved locally
@@ -1941,15 +1924,13 @@
     return true;
   }
 
-  // True if the selected project holds a REAL design — a Verilog module that isn't just
-  // the untouched default starter that "+ New" seeds — so a freshly-created Silebro
-  // project isn't mistaken for an imported / spec-less design.
+  // True if the selected project holds a REAL design — any non-empty Verilog module.
+  // A freshly-created project starts empty (no placeholder), so it returns false until
+  // the build (or an import) adds real modules.
   function hasRealDesign() {
-    var starter = String(STARTER_CODE || "").trim();
     return files.some(function (f) {
       if (!isVerilogName(f.name) || f.name === "netlist.v") return false;
-      var code = String(f.code || "").trim();
-      return code && code !== starter;
+      return !!String(f.code || "").trim();
     });
   }
 
@@ -3370,19 +3351,18 @@
 
   var PROVIDER_INFO = {
     bedrock: {
-      model: "us.meta.llama3-3-70b-instruct-v1:0",
+      model: "deepseek.v3-v1:0",
       account: true, // no BYOK key — uses free credit (guest) or the account's credit
       hint: "No API key needed — free credit to start (no account required). Runs open models on Amazon Bedrock; sign in for a larger monthly allowance.",
       models: [
-        "us.meta.llama3-3-70b-instruct-v1:0",
-        "us.meta.llama4-maverick-17b-instruct-v1:0",
-        "us.meta.llama4-scout-17b-instruct-v1:0",
+        "deepseek.v3-v1:0",
+        "deepseek.v3.2",
         "us.deepseek.r1-v1:0",
-        "us.amazon.nova-pro-v1:0",
-        "us.mistral.pixtral-large-2502-v1:0",
-        "us.amazon.nova-lite-v1:0",
-        "us.amazon.nova-micro-v1:0",
         "us.meta.llama3-1-8b-instruct-v1:0",
+        "us.meta.llama4-scout-17b-instruct-v1:0",
+        "us.meta.llama4-maverick-17b-instruct-v1:0",
+        "meta.llama3-3-70b-instruct-v1:0",
+        "us.meta.llama3-1-70b-instruct-v1:0",
       ],
     },
     openrouter: {
@@ -3646,15 +3626,14 @@
 
   // Friendly display names for Bedrock model IDs (raw ids are ugly).
   var MODEL_LABELS = {
-    "us.meta.llama3-3-70b-instruct-v1:0": "Llama 3.3 70B",
-    "us.meta.llama4-maverick-17b-instruct-v1:0": "Llama 4 Maverick",
-    "us.meta.llama4-scout-17b-instruct-v1:0": "Llama 4 Scout",
-    "us.meta.llama3-1-8b-instruct-v1:0": "Llama 3.1 8B",
+    "deepseek.v3-v1:0": "DeepSeek-V3.1",
+    "deepseek.v3.2": "DeepSeek-V3.2",
     "us.deepseek.r1-v1:0": "DeepSeek-R1",
-    "us.amazon.nova-pro-v1:0": "Amazon Nova Pro",
-    "us.amazon.nova-lite-v1:0": "Amazon Nova Lite",
-    "us.amazon.nova-micro-v1:0": "Amazon Nova Micro",
-    "us.mistral.pixtral-large-2502-v1:0": "Mistral Pixtral Large"
+    "us.meta.llama3-1-8b-instruct-v1:0": "Llama 3.1 8B",
+    "us.meta.llama4-scout-17b-instruct-v1:0": "Llama 4 Scout",
+    "us.meta.llama4-maverick-17b-instruct-v1:0": "Llama 4 Maverick",
+    "meta.llama3-3-70b-instruct-v1:0": "Llama 3.3 70B",
+    "us.meta.llama3-1-70b-instruct-v1:0": "Llama 3.1 70B"
   };
   // Fill the model dropdown with popular models for the chosen provider.
   function populateModelList(provider) {
