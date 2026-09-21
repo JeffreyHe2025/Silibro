@@ -29,7 +29,10 @@ Plus a **harness** (monthly benchmark, Node, no framework) run by cron on the ba
   **app-view** (signed in), plus a right-hand **chat panel** ("LLM Connection").
   Loads Supabase JS + Ace + JSZip + Mermaid from CDN, then `config.js`, then
   `app.js?v=NN` (cache-buster bumped on every JS/CSS change).
-- `styles.css` — all styling (light theme, `.hidden` utility).
+- `styles.css` — all styling. **Theme-aware**: a light default plus a full
+  `html[data-theme="dark"]` override block; a 🌗 toggle (`applyTheme`/`curTheme`) stores
+  the choice and an inline `<head>` script stamps `data-theme` before CSS to avoid a
+  flash. `.hidden` utility for show/hide.
 - `config.js` — `window.SUPABASE_CONFIG = { url, anonKey }` (non-secret).
 - Standalone pages, each a self-contained folder with its own inline CSS, served at a
   trailing-slash path (Amplify strips `.html`, so use `folder/index.html`):
@@ -75,25 +78,37 @@ Plus a **harness** (monthly benchmark, Node, no framework) run by cron on the ba
   Use as spec, Sync current code, GitHub push, Export/zip via JSZip).
 
 ### 2.4 Chat panel / LLM connection
-- Header icons: expand, **☰ history**, **✎ new chat**, **🔑 settings**, **✕ close**.
-  History + New are always visible (even with no key) so past chats are viewable;
-  only *sending* needs a key.
+- Header icons: expand, **✎ new chat**, **🔑 settings**, **✕ close**. (The old global
+  "Chats" list / ☰ history view was removed — chats are organized per-project instead;
+  see below.) New/settings are visible even with no key; only *sending* needs a key.
 - **Providers** (`PROVIDER_INFO`): `bedrock` (default; no key — uses account/anon free
-  credit), `anthropic`, `openai`, `google`, `openrouter`. Each has a model list; Bedrock
-  lists the non-Claude free-tier models (Llama/DeepSeek/Nova/Pixtral) with friendly
-  labels. `getProviderModel/setProviderModel` persist per provider in localStorage.
+  credit), `anthropic`, `openai`, `google`, `openrouter`. `getProviderModel/setProviderModel`
+  persist per provider in localStorage. Bedrock's model dropdown lists the curated
+  Llama + DeepSeek free-tier set with friendly labels (`MODEL_LABELS`); its **default is
+  `deepseek.v3-v1:0` (DeepSeek-V3.1)**, followed by DeepSeek V3.2/R1 and Llama 3.1 8B /
+  4 Scout / 4 Maverick / 3.3 70B / 3.1 70B. (The models page under `models/` shows the
+  same set with per-token pricing.)
 - **Connect**: for BYOK, save+test the key (stored in `sessionStorage`, cleared on
   browser close; survives reload). For Bedrock, "connected" == selected (no key);
   `getProviderKey("bedrock")` returns a sentinel `"account"` so `if(!key)` gates pass.
-- **Context management**: the plain-chat path sends the full `chatHistory`. Before each
-  send, `maybeSummarizeContext()`: if the transcript exceeds ~8k tokens (32k chars,
-  ≥4 msgs), summarize it (preserving module names/ports/widths/reset style/decisions)
-  and start a **fresh session** seeded with that summary. The build path prepends a
-  bounded `buildContextPreamble()` (carried-over summary + last ~5 user requests) so
-  follow-ups ("make it 16-bit") are context-aware.
-- **History**: conversations persist to Supabase per user. `loadConversations(autoOpen)`
-  only auto-opens the last chat on initial sign-in restore (`autoOpen=true`); clicking
-  ☰ must NOT auto-open (otherwise it boots into a chat).
+- **Per-project chats (one chat ↔ one project)**: every chat is linked to a single
+  project via `conversations.project_id` and named after that project on first link
+  (`linkChatToProject`). The project sidebar shows that project's chats
+  (`#project-chats`); opening a project opens its most-recent chat (or a fresh one);
+  a new project starts a fresh chat. A prompt that looks like a *different* design shows
+  a "this sounds like a new project — start new chat?" button that copies the prompt.
+  The chat is persisted+linked at **build start**, so it survives switching to another
+  project mid-build and back (it no longer disappears).
+- **Context management**: the plain-chat path sends `chatHistory`. `maybeCompactContext`
+  keeps a rolling per-chat memory — an incremental running **summary** + structured
+  **facts** + an **archive** of older turns (retrievable via `retrieveFromArchive`),
+  all stored in a hidden `_meta` record at index 0 of the conversation's `messages`.
+  The build path prepends a bounded `buildContextPreamble()` (carried summary + last ~5
+  user requests) so follow-ups ("make it 16-bit") are context-aware.
+- **Persistence**: conversations persist to Supabase per user. `loadConversations(autoOpen)`
+  only auto-opens the last chat on initial sign-in restore (`autoOpen=true`). Project and
+  chat deletes use an **undo snackbar** and a localStorage pending-delete queue flushed at
+  startup, so a delete survives reload; deleting a project cascade-deletes its chats.
 
 ### 2.5 Build flow (frontend side)
 - Sending a prompt runs the **Verifier → approval → Builder** flow via the backend
@@ -105,6 +120,16 @@ Plus a **harness** (monthly benchmark, Node, no framework) run by cron on the ba
   `editRequest`**. The backend updates the spec and rebuilds/re-testbenches **only the
   affected modules** (see 3.3). The returned updated spec is saved back to `spec.md`.
   A fresh/empty project falls through to the full Verifier→approval→Builder flow.
+- **New projects start empty** — no placeholder file. The build fills in the modules;
+  the top module is auto-designated from the build (a user ☆ star overrides).
+- **Per-project console + concurrent builds**: console output is buffered per project
+  (`projectConsoles` keyed by project id; `buildLogTarget` routes a running build's
+  output to *its* project). Switching projects mid-build leaves the build running in the
+  background with its output going to the right console (never bleeding into the one on
+  screen). `finishFlowBuild(data, pid, cid)` captures the built project + chat at start
+  and writes files/summary back to **that** project/chat even if the user has navigated
+  away (via `applyFileEditsTo`/`persistBuildMessagesTo`). **Stop** halts everything for
+  that project (console + backend `/flow/stop`).
 - All Bedrock-capable fetches send `credentials: "include"` + `X-Anon-Id` (see 2.7)
   and the user's JWT via `Authorization` when signed in.
 
@@ -182,11 +207,16 @@ the harness; `authAdmin` (JWT + ADMIN_EMAILS) for the browser):
   `costMicros` (with markup) and `rawCostMicros` (real AWS cost, no markup).
 
 ### 3.3 Agentic pipeline (`flow.js` + `build.js`)
-LangGraph state machine (`flow.js`): nodes **verifier → approval → builder →
-verifierReview**. `verifier` writes the spec; if the request is not hardware it sets
-`offTopic`+`redirect` and routes to END. `approval` uses `interrupt({spec})` so the
-frontend can approve/edit. `builder` runs `buildDesign`; `verifierReview` a final pass.
+LangGraph state machine (`flow.js`): nodes **verifier → approval → builder → END**.
+`verifier` writes the spec; if the request is not hardware it sets `offTopic`+`redirect`
+and routes to END. `approval` uses `interrupt({spec})` so the frontend can approve/edit.
+`builder` runs `buildDesign` **and returns the final review itself** (the old separate
+`verifierReview` node was removed — the holistic review is `finalConformanceSweep`, step 7).
 `startFlow`/`resumeFlow` drive it with a `MemorySaver` per `threadId`.
+
+All LLM Verilog is pulled from replies by `extractVerilog`, which also runs
+`fixNegSizedLiterals` — a deterministic rewrite of the illegal `16'd-1` form (negative
+digits after the base, which Icarus tolerates but Verilator rejects) to `-16'd1`.
 
 `buildDesign(llm, spec, onProgress, verifierLLM, decide, control)` (`build.js`):
 1. `planGraph` → module list (name, purpose, dependsOn) from the spec.
@@ -206,9 +236,32 @@ frontend can approve/edit. `builder` runs `buildDesign`; `verifierReview` a fina
 6. Verification tiers: structural (lint via iverilog, synth via yosys) + a code-gen
    **smoke** baseline on every module; **functional** tier adds an LLM oracle testbench
    with fault localization/repair (`localizeAndFix`) + Verilator line coverage
-   (display-only). A per-build **fixBudget** bounds LLM correction calls; at thresholds
-   it asks the user (continue|buildOnly|raiseCutoff).
-7. `finalConformanceSweep` — one holistic review, loop fixes.
+   (display-only). Every stage that can fail **feeds the exact tool error (with line
+   numbers) back to the builder/testbench** and retries, each bounded and charged to the
+   `fixBudget`:
+   - **compile** (`buildModule`): retries feed the full iverilog error + numbered source;
+     a bare "syntax error" is enriched with `verilatorLint`'s precise diagnostic.
+   - **structural** (`fixModuleStructural`): a module that compiles but fails lint or
+     yosys synthesis (e.g. a `for` step that isn't a simple `i=i±1`, which Verilator can't
+     unroll for coverage) is rebuilt from the exact lint/synth error. Otherwise a lint/
+     synth failure would silently skip the functional test + coverage.
+   - **smoke** (`fixModuleFromSmoke`): X / stuck-undriven outputs → rebuild before the
+     oracle test.
+   - **functional oracle** (`funcTest`/`repairFunctionalTestbench`): a testbench that
+     won't compile or prints no FUNC_PASS/FUNC_FAIL is rewritten from the exact error +
+     numbered testbench source, again enriched with Verilator's precise diagnostic on a
+     bare iverilog error; the generator is steered to a **simple linear** testbench (no
+     internal FSM, no clock for a combinational DUT).
+   - **coverage** (`runVerilatorCoverage`): preflights that Verilator is present and **≥ 5.0**
+     (the `--binary` flow) and distinguishes a missing C++ toolchain from a Verilog
+     incompatibility; on a testbench-attributed build failure it feeds Verilator's exact
+     error back to `repairFunctionalTestbench` and retries. Coverage is display-only and
+     never blocks verification.
+   At `fixBudget` thresholds it asks the user (continue|buildOnly|raiseCutoff). All fix
+   failures/`[funcTest]`/`[structFix]`/`[coverage]`/`[coverageFix]` details are also
+   logged server-side for `pm2 logs`.
+7. `finalConformanceSweep` — one holistic review (`reviewAllConformance` → `{verdicts,prose}`),
+   loop fixes.
 Returns `{files:{name:code}, results, summaries, manifest, dependencyGraph, review}`.
 Builder temperature is low (steadier); Verifier keeps its own temperature.
 
@@ -216,6 +269,14 @@ Builder temperature is low (steadier); Verifier keeps its own temperature.
 Every function writes files to a fresh `fs.mkdtempSync` dir and shells out:
 `iverilog -g2012` + `vvp` (compile/sim), `yosys` (`read_verilog -sv`, lint/synth),
 `verilator --binary --coverage --timing` (coverage). All parse tool output and clean up.
+- `verilatorLint(files, top)` — `verilator --lint-only`; used to turn iverilog's useless
+  bare "syntax error" into a precise "unexpected X, expecting Y" (with the right line),
+  fed into module and testbench retry prompts.
+- `runVerilatorCoverage` — **requires Verilator ≥ 5.0** (for `--binary`) **and a C++
+  toolchain** (`make` + `g++`), which it preflights, returning a crisp reason otherwise
+  (old-Verilator vs. missing-toolchain vs. Verilog-incompatible) plus the raw stderr as
+  `output`. Parses `verilator_coverage --annotate` output (`~NNN`/` NNN` per-line hit
+  counts) for a line-executed %.
 
 ### 3.5 Billing & free tier
 - **BYOK** calls: not metered (user pays their provider).
@@ -308,7 +369,7 @@ must be copied from the repo, cannot be regenerated; "meta" = not application lo
 | --- | --- |
 | `index.html` | §2.1 (structure), §2.2–2.5 (element behaviors) |
 | `app.js` | §2 (all frontend behavior) |
-| `styles.css` | §2.1 (light theme, `.hidden`); exact CSS at author's discretion |
+| `styles.css` | §2.1 (theme-aware light + dark, `.hidden`); exact CSS at author's discretion |
 | `config.js` | §2.1 + DEPLOY §1 (`SUPABASE_CONFIG`) |
 | `models/`, `leaderboard/`, `admin/`, `confirmed/`, `reset/` (each `index.html`) | §2.1 |
 | `amplify.yml` | §5 + DEPLOY §2 (static build manifest) |

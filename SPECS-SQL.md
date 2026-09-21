@@ -109,10 +109,13 @@ create table if not exists public.conversations (
   title       text not null default 'New chat',
   provider    text,
   model       text,
-  messages    jsonb not null default '[]'::jsonb,   -- [{role, content, images?}]
+  project_id  text,                                 -- one chat ↔ one project (see note)
+  messages    jsonb not null default '[]'::jsonb,   -- [{role, content, images?}, {role:"_meta",summary,facts,archive}]
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+-- Idempotent add for tables created before per-project chats existed:
+alter table public.conversations add column if not exists project_id text;
 create index if not exists conversations_user_updated_idx on public.conversations (user_id, updated_at desc);
 
 alter table public.conversations enable row level security;
@@ -122,6 +125,13 @@ drop trigger if exists conversations_set_updated_at on public.conversations;
 create trigger conversations_set_updated_at before update on public.conversations
   for each row execute function public.set_updated_at();
 ```
+
+**`project_id`** links each chat to a single project ("each chat works on one project";
+the sidebar lists a project's chats and names a new chat after its project). It is plain
+`text` (not an FK) so guest/local project ids fit too; the server selects it with a
+graceful fallback (older DBs without the column still work), and deleting a project's
+chats is done in the app, not by a DB cascade. The `_meta` message at index 0 of
+`messages` carries long-chat memory (running summary + key facts + archived turns).
 
 ---
 

@@ -42,7 +42,10 @@ cd Verilog_coder_website
    **Core app tables**
    1. `supabase-schema.sql`            — `projects` table + RLS
    2. `supabase-files-migration.sql`   — `files` table + RLS
-   3. `supabase-conversations-migration.sql` — `conversations` table + RLS
+   3. `supabase-conversations-migration.sql` — `conversations` table + RLS (includes the
+      `project_id` column that links each chat to one project; **re-run this file** if you
+      set up the DB before per-project chats existed — the `add column if not exists` is
+      idempotent)
 
    **Billing / free tier** (needed only if you use Amazon Bedrock)
    4. `backend/billing-schema.sql`     — `billing_accounts`, `usage_events`, credit funcs
@@ -107,9 +110,16 @@ Caddy/Nginx for TLS, or an Amplify/other reverse proxy.
 - Install runtime + EDA tools:
   ```bash
   sudo apt-get update
-  sudo apt-get install -y nodejs npm iverilog yosys verilator git
+  sudo apt-get install -y nodejs npm iverilog yosys verilator git build-essential
   sudo npm i -g pm2            # process manager
   ```
+  > **Coverage needs Verilator ≥ 5.0** (it uses the `--binary` flow) **plus a C++
+  > toolchain** (`make` + `g++`, from `build-essential`). Many apt repos still ship
+  > Verilator **4.x**, where `--binary` doesn't exist and coverage silently can't run —
+  > check `verilator --version`, and if it's < 5, build from source
+  > (<https://github.com/verilator/verilator>, `git checkout v5.026 && autoconf &&
+  > ./configure && make -j"$(nproc)" && sudo make install`). Compile/lint/synth/sim work
+  > fine on 4.x; only Verilator coverage requires ≥ 5.0.
 - Give it a stable public hostname with HTTPS. One easy path:
   - Register a free subdomain at <https://duckdns.org>, point it at the instance IP.
   - Install **Caddy** (auto-TLS) reverse-proxying `:443 → :3000`.

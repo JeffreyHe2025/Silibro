@@ -8,10 +8,16 @@ create table if not exists public.conversations (
   title       text not null default 'New chat',
   provider    text,
   model       text,
+  project_id  text,   -- links a chat to ONE project (each chat works on one project);
+                      -- text (not an FK) so guest/local project ids fit too. Cascade
+                      -- delete of a project's chats is handled in the app, not the DB.
   messages    jsonb not null default '[]'::jsonb,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+
+-- Add the column to any pre-existing conversations table (safe to re-run).
+alter table public.conversations add column if not exists project_id text;
 
 create index if not exists conversations_user_updated_idx
   on public.conversations (user_id, updated_at desc);
