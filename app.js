@@ -492,6 +492,24 @@
     authMessage.className = "auth-message" + (kind ? " " + kind : "");
   }
 
+  // Turn a raw Supabase auth error into a plain-English message. Supabase returns a
+  // network failure as "Failed to fetch" (NOT a wrong password — a wrong password is
+  // "Invalid login credentials"), so each case gets its own clear wording.
+  function friendlyAuthError(em) {
+    em = String(em || "");
+    if (/invalid login credentials|invalid credentials|invalid.*password|wrong password/i.test(em))
+      return "Email or password is incorrect.";
+    if (/email not confirmed|not confirmed/i.test(em))
+      return "Please confirm your email first — check your inbox (and spam) for the verification link we sent, then sign in.";
+    if (/user already registered|already registered|already exists/i.test(em))
+      return "An account with this email already exists — try signing in instead.";
+    if (/failed to fetch|network|fetch failed|load failed|networkerror/i.test(em))
+      return "Couldn't reach the sign-in server. Check your internet connection and try again in a moment.";
+    if (/rate limit|too many/i.test(em))
+      return "Too many attempts — please wait a minute and try again.";
+    return em || "Something went wrong — please try again.";
+  }
+
   function setAuthMode(mode) {
     authMode = mode;
     if (mode === "signup") {
@@ -553,8 +571,10 @@
       if (!email) { setAuthMessage("Enter your email above first, then click “Forgot password?”.", "error"); authEmail.focus(); return; }
       setAuthMessage("Sending reset link…", "info");
       sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/reset/" }).then(function (res) {
-        if (res.error) { setAuthMessage(res.error.message, "error"); return; }
+        if (res.error) { setAuthMessage(friendlyAuthError(res.error.message), "error"); return; }
         setAuthMessage("📧 If an account exists for " + email + ", we've sent a password-reset link. Check your inbox (and spam).", "success");
+      }).catch(function (err) {
+        setAuthMessage(friendlyAuthError((err && err.message) || err), "error");
       });
     });
   }
@@ -582,11 +602,7 @@
     op.then(function (res) {
       authSubmit.disabled = false;
       if (res.error) {
-        var em = res.error.message || "Something went wrong.";
-        if (/email not confirmed|not confirmed/i.test(em)) {
-          em = "Please confirm your email first — check your inbox (and spam) for the verification link we sent, then sign in.";
-        }
-        setAuthMessage(em, "error");
+        setAuthMessage(friendlyAuthError(res.error.message), "error");
         return;
       }
       if (authMode === "signup" && !res.data.session) {
@@ -601,6 +617,10 @@
         return;
       }
       // onAuthStateChange swaps to the app view.
+    }).catch(function (err) {
+      // Network/unexpected failure (promise rejected rather than returning res.error).
+      authSubmit.disabled = false;
+      setAuthMessage(friendlyAuthError((err && err.message) || err), "error");
     });
   });
 
